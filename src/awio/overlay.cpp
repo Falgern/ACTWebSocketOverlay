@@ -1382,7 +1382,6 @@ extern "C" int ModRender(ImGuiContext* context)
 			if (ImGui::ImageButton(overlay_texture, ImVec2(27 / 2, 25 / 2), cog.uv0, cog.uv1, -1, ImVec4(0, 0, 0, 0), ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity)))
 			{
 
-				ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], resizegrip_opacity));
 				show_preferences = !show_preferences;
 				
 			}
@@ -1405,7 +1404,7 @@ extern "C" int ModRender(ImGuiContext* context)
 			if (show_preferences)
 			{
 				hiddengrip = false;
-					Preference(context, &show_preferences);
+				Preference(context, &show_preferences);
 			}
 			else
 			{
