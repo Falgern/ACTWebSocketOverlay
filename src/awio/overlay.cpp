@@ -98,36 +98,43 @@ public:
 
 	int column_margin = 2;
 
-	void UpdateColumnWidth(int width, int height, int column_max)
+	void UpdateColumnWidth(int width, int height, int column_max, float scale)
 	{
-		if (columns.size() > 0)
-			columns[0].size = height;
+		//if (columns.size() > 0)
+		//	columns[0].size = height / scale;
 		int columnSizeWeightSum = 0;
 		int columnSizeFixed = 0;
 		for (int i = 0; i < column_max; ++i) {
+			if (!columns[i].visible)
+				continue;
 			if (columns[i].sizeWeight != 0)
 			{
 				columnSizeWeightSum += columns[i].sizeWeight;
 			}
 			else
 			{
-				columnSizeFixed += columns[i].size + column_margin * 2;
+				// icon size must be fixed.
+				columnSizeFixed += (columns[i].size + column_margin * 2) * scale;
 			}
 		}
 		int offset = 0;
 		for (int i = 0; i < column_max; ++i) {
+			if (!columns[i].visible)
+				continue;
 			if (columns[i].sizeWeight != 0)
 			{
-				columns[i].size = std::max(0, ((width - columnSizeFixed) * columns[i].sizeWeight) / columnSizeWeightSum);
+				columns[i].size = std::max(0,((width - columnSizeFixed) * columns[i].sizeWeight) / columnSizeWeightSum) / scale;
 			}
-			columns[i].offset = offset + column_margin;
-			offset += columns[i].size + column_margin;
+			columns[i].offset = offset + (column_margin) * scale;
+			offset += (columns[i].size + column_margin) * scale;
 		}
 
 		for (int i = 2; i < column_max; ++i) {
-			if (columns[i - 1].offset + columns[i - 1].size > columns[i].offset)
+			if (!columns[i].visible)
+				continue;
+			if (columns[i - 1].offset + columns[i - 1].size * scale > columns[i].offset)
 			{
-				columns[i].offset = columns[i - 1].offset + columns[i - 1].size;
+				columns[i].offset = columns[i - 1].offset + (columns[i - 1].size) * scale;
 			}
 		}
 	}
@@ -161,6 +168,7 @@ static float& title_background_opacity = opacity_map["TitleBackground"];
 static float& resizegrip_opacity = opacity_map["ResizeGrip"];
 //static float& toolbar_opacity = opacity_map["Toolbar"];
 static float& graph_opacity = opacity_map["Graph"];
+static bool hiddengrip = TRUE;
 static std::string default_pet_job;
 
 ImVec4 htmlCodeToImVec4(const std::string hex)
@@ -433,19 +441,18 @@ extern "C" int ModInit(ImGuiContext* context)
 		return true;
 
 
-
-
 	dealerTable.columns.push_back(Table::Column("", "Job", (overlay_texture != nullptr) ? 30 : 20, 0, ImVec2(0.5f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("Name", "name", 0, 2, ImVec2(0.1f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("D%", "damage%", 30, 0, ImVec2(0.2f, 0.5f)));
+	dealerTable.columns.back().visible = false;
 	// modify
+	dealerTable.columns.push_back(Table::Column("D%", "damage%", 30, 0, ImVec2(0.2f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("DPS", "encdps", 40, 1, ImVec2(0.2f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("D.Tot", "damage", 60, 1, ImVec2(0.2f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("Crit", "crithit%", 30, 1, ImVec2(0.2f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("HPS", "enchps", 40, 1, ImVec2(0.2f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("H.Tot", "healed", 60, 1, ImVec2(0.2f, 0.5f)));
 	dealerTable.columns.push_back(Table::Column("Miss", "misses", 28, 0, ImVec2(0.2f, 0.5f)));
-
 	// Color category
 	color_category_map["Tank"].push_back("Pld");
 	color_category_map["Tank"].push_back("Gld");
@@ -485,6 +492,8 @@ extern "C" int ModInit(ImGuiContext* context)
 	color_category_map["UI"].push_back("TitleBackgroundActive");
 	color_category_map["UI"].push_back("TitleBackgroundCollapsed");
 	color_category_map["UI"].push_back("ResizeGrip");
+	color_category_map["UI"].push_back("ResizeGripActive");
+	color_category_map["UI"].push_back("ResizeGripHovered");
 	color_category_map["UI"].push_back("TitleText");
 	color_category_map["UI"].push_back("GraphText");
 	//color_category_map["UI"].push_back("ToolbarBackground");
@@ -818,9 +827,12 @@ void RenderTableColumnHeader(Table& table, int height)
 	const ImGuiStyle& style = ImGui::GetStyle();
 	ImGuiWindow* window = ImGui::GetCurrentWindow();
 
+	const ImGuiIO& io = ImGui::GetIO();
 	int base = ImGui::GetCursorPosY();
 	for (int i = 0; i < table.columns.size(); ++i)
 	{
+		if (!table.columns[i].visible)
+			continue;
 		const ImGuiStyle& style = ImGui::GetStyle();
 		ImVec2 winpos = ImGui::GetWindowPos();
 		ImVec2 pos = ImGui::GetCursorPos();
@@ -841,7 +853,7 @@ void RenderTableColumnHeader(Table& table, int height)
 			else
 			{
 				ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(ImVec4(0, 0, 0, 1), text_opacity * global_opacity));
-				ImGui::RenderTextClipped(ImVec2(pos.x + 1, pos.y + 1), ImVec2(pos.x + table.columns[i].size + 1, pos.y + height + 1),
+				ImGui::RenderTextClipped(ImVec2(pos.x + 1, pos.y + 1), ImVec2(pos.x + (table.columns[i].size + 1) * io.FontGlobalScale, pos.y + height + 1),
 					text.c_str(),
 					text.c_str() + text.size(),
 					nullptr,
@@ -850,7 +862,7 @@ void RenderTableColumnHeader(Table& table, int height)
 					nullptr);
 				ImGui::PopStyleColor();
 				ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["GraphText"], text_opacity * global_opacity));
-				ImGui::RenderTextClipped(pos, ImVec2(pos.x + table.columns[i].size, pos.y + height),
+				ImGui::RenderTextClipped(pos, ImVec2(pos.x + (table.columns[i].size) * io.FontGlobalScale, pos.y + height),
 					text.c_str(),
 					text.c_str() + text.size(),
 					nullptr,
@@ -870,6 +882,7 @@ void RenderTableRow(Table& table, int row, int height)
 	const ImGuiStyle& style = ImGui::GetStyle();
 	ImGuiWindow* window = ImGui::GetCurrentWindow();
 
+	const ImGuiIO& io = ImGui::GetIO();
 	int offset = 0;
 	int base = ImGui::GetCursorPosY();
 	ImGui::SetCursorPos(ImVec2(0, base));
@@ -907,6 +920,8 @@ void RenderTableRow(Table& table, int row, int height)
 
 		for (int j = 0; j < table.columns.size() && j < table.values[i].size(); ++j)
 		{
+			if (!table.columns[j].visible)
+				continue;
 			ImGui::SetCursorPos(ImVec2(table.columns[j].offset + style.ItemInnerSpacing.x, base));
 			ImVec2 winpos = ImGui::GetWindowPos();
 			ImVec2 pos = ImGui::GetCursorPos();
@@ -921,14 +936,14 @@ void RenderTableRow(Table& table, int row, int height)
 				if ((im = overlay_images.find(icon)) != overlay_images.end())
 				{
 					ImGuiWindow* window = ImGui::GetCurrentWindow();
-					window->DrawList->AddImage(overlay_texture, ImVec2(pos.x + 1, pos.y + 1), ImVec2(pos.x + table.columns[j].size + 1, pos.y + height + 1),
+					window->DrawList->AddImage(overlay_texture, ImVec2(pos.x + 1, pos.y + 1), ImVec2(pos.x + (table.columns[j].size + 1)*io.FontGlobalScale, pos.y + height + 1),
 						im->second.uv0, im->second.uv1);// , GetColorU32(tint_col));
 				}
 			}
 			else if (j != 1 || show_name)
 			{
 				ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(ImVec4(0, 0, 0, 1), text_opacity * global_opacity));
-				ImGui::RenderTextClipped(ImVec2(pos.x + 1, pos.y + 1), ImVec2(pos.x + table.columns[j].size + 1, pos.y + height + 1),
+				ImGui::RenderTextClipped(ImVec2(pos.x + 1, pos.y + 1), ImVec2(pos.x + (table.columns[j].size + 1) * io.FontGlobalScale, pos.y + height + 1),
 					text.c_str(),
 					text.c_str() + text.size(),
 					nullptr,
@@ -936,7 +951,7 @@ void RenderTableRow(Table& table, int row, int height)
 					nullptr);
 				ImGui::PopStyleColor();
 				ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["GraphText"], text_opacity * global_opacity));
-				ImGui::RenderTextClipped(pos, ImVec2(pos.x + table.columns[j].size, pos.y + height),
+				ImGui::RenderTextClipped(pos, ImVec2(pos.x + table.columns[j].size * io.FontGlobalScale, pos.y + height),
 					text.c_str(),
 					text.c_str() + text.size(),
 					nullptr,
@@ -961,7 +976,7 @@ void RenderTable(Table& table)
 	int windowWidth = ImGui::GetWindowSize().x - style.ItemInnerSpacing.x * 2.0f - 10;
 	int column_max = table.columns.size();
 	const int height = 20 * io.FontGlobalScale;
-	table.UpdateColumnWidth(windowWidth, height, column_max);
+	table.UpdateColumnWidth(windowWidth, height, column_max, io.FontGlobalScale);
 
 	ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["GraphText"], text_opacity * global_opacity));
 	RenderTableColumnHeader(table, height);
@@ -977,13 +992,15 @@ void RenderTable(Table& table)
 
 void Preference(ImGuiContext* context, bool* show_preferences)
 {
-	ImGui::Begin("Preferences", show_preferences, ImVec2(500, 500), -1, ImGuiWindowFlags_NoCollapse);
+
+
+	ImGui::Begin(" Preferences", show_preferences, ImVec2(500, 500), -1, ImGuiWindowFlags_NoCollapse);
 	{
 
 
 		if (ImGui::TreeNode("Table"))
 		{
-			if (ImGui::TreeNode("Dealer Table"))
+			if (ImGui::TreeNode("DPS Table"))
 			{
 				std::vector<const char*> columns;
 				Table& table = dealerTable;
@@ -1001,14 +1018,14 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 				static int index = -1;
 				bool decIndex = false;
 				bool incIndex = false;
-				if (ImGui::Combo("Dest Column", &index_, columns.data(), columns.size()))
+				if (ImGui::ListBox("Column", &index_, columns.data(), columns.size()))
 				{
 					index = index_ >= 0 ? index_ + 3 : index_;
 					strcpy(buf, table.columns[index].Title.c_str());
 					width = table.columns[index].size;
 					align = table.columns[index].align.x;
 				}
-				if (ImGui::Button("<-"))
+				if (ImGui::Button("Up"))
 				{
 					if (index > 3 && index != NULL && index >= 0)
 					{
@@ -1025,7 +1042,7 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 					}
 				}
 				ImGui::SameLine();
-				if (ImGui::Button("->"))
+				if (ImGui::Button("Down"))
 				{
 					if (index + 1 < table.columns.size() && index != NULL && index >= 0)
 					{
@@ -1041,7 +1058,8 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 						incIndex = true;
 					}
 				}
-				if (ImGui::Button("Edit Column"))
+				ImGui::SameLine();
+				if (ImGui::Button("Edit"))
 				{
 					ImGui::OpenPopup("Edit Column");
 				}
@@ -1085,7 +1103,7 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 				}
 				ImGui::SameLine();
 
-				if (ImGui::Button("Remove Column"))
+				if (ImGui::Button("Remove"))
 				{
 					if (index > 0)
 					{
@@ -1139,7 +1157,7 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 					}
 				}
 				ImGui::SameLine();
-				if (ImGui::Button("Append Column"))
+				if (ImGui::Button("Append"))
 				{
 					ImGui::OpenPopup("Append Column");
 				}
@@ -1178,6 +1196,7 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 							table.columns.push_back(col);
 
 							ImGui::CloseCurrentPopup();
+							strcpy(buf, "");
 							current_item = -1;
 							width = 50;
 							align = 0.5f;
@@ -1308,7 +1327,15 @@ extern "C" int ModRender(ImGuiContext* context)
 			ImGui::PushStyleColor(ImGuiCol_TitleBg, ColorWithAlpha(color_map["TitleBackground"], title_background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ColorWithAlpha(color_map["TitleBackgroundActive"], title_background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, ColorWithAlpha(color_map["TitleBackgroundCollapsed"], title_background_opacity * global_opacity));
-			ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], resizegrip_opacity));
+			if(!hiddengrip){
+				ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], resizegrip_opacity));
+			}
+			else
+			{
+				ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], 0.0f));
+			}
+			ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, ColorWithAlpha(color_map["ResizeGripActive"], resizegrip_opacity));
+			ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, ColorWithAlpha(color_map["ResizeGripHovered"], resizegrip_opacity));
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5, 0.5, 0.5, background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3, 0.3, 0.3, background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0, 0.0, 0.0, 0.0f));
@@ -1355,47 +1382,13 @@ extern "C" int ModRender(ImGuiContext* context)
 			if (ImGui::ImageButton(overlay_texture, ImVec2(27 / 2, 25 / 2), cog.uv0, cog.uv1, -1, ImVec4(0, 0, 0, 0), ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity)))
 			{
 
+				ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], resizegrip_opacity));
 				show_preferences = !show_preferences;
-				/*
-				auto &io = ImGui::GetIO();
-				int height = 40 * io.FontGlobalScale;
-				const ImGuiStyle& style = ImGui::GetStyle();
-				ImGuiWindow* window = ImGui::GetCurrentWindow();
-				ImVec2 winsize = ImGui::GetWindowSize();
-				//ImGui::SetCursorPos(ImVec2(0, base + i * height));
-				ImVec2 winpos = ImGui::GetWindowPos();
-				ImVec2 pos = ImGui::GetCursorPos();
-				pos = ImVec2(pos.x + winpos.x, pos.y + winpos.y - height);
-				//pos = window->DC.CursorPos;
-				int windowWidth = ImGui::GetWindowSize().x - style.ItemInnerSpacing.x * 2.0f;// -style.ScrollbarSize;
-				int windowHeight= ImGui::GetWindowSize().y - style.ItemInnerSpacing.y * 2.0f;// -style.ScrollbarSize;
-				ImRect bb(ImVec2(winpos.x, winpos.y + windowHeight - height), ImVec2(pos.x + windowWidth, winpos.y+ windowHeight));
-				ImGui::GetWindowDrawList()->AddRectFilled(bb.Min, bb.Max, ImGui::GetColorU32(ColorWithAlpha(color_map["ToolbarBackground"], toolbar_opacity * global_opacity)));
-				//ImGui::RenderFrame(bb.Min, bb.Max, , true, 0);
-
-				// title
-
-				ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity));
-				std::string duration_short = "- " + duration;
-
-				ImGui::SetCursorPos(ImVec2(style.ItemInnerSpacing.x, windowHeight - height+3*io.FontGlobalScale));
-				pos = ImGui::GetCursorPos();
-				ImGui::Text("%s - %s", zone.c_str(), duration.c_str(), rdps.c_str(), rhps.c_str());
-				ImGui::Text("RDPS : %s RHPS : %s", rdps.c_str(), rhps.c_str());
-				ImGui::SetCursorPos(ImVec2(windowWidth - 65 * io.FontGlobalScale / 2, pos.y));
-				Image& cog = overlay_images["cog"];
-				if (ImGui::ImageButton(overlay_texture, ImVec2(65* io.FontGlobalScale / 2, 60 * io.FontGlobalScale / 2), cog.uv0, cog.uv1, -1, ImVec4(0, 0, 0, 0), ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity)))
-				{
-					show_preferences = !show_preferences;
-				}
-				
-				ImGui::PopStyleColor();
-				*/
 				
 			}
 
 			ImGui::EndChild();
-			ImGui::PopStyleColor();
+			//ImGui::PopStyleColor();
 
 			RenderTable(dealerTable);
 
@@ -1404,21 +1397,21 @@ extern "C" int ModRender(ImGuiContext* context)
 
 
 			ImGui::End();
-			ImGui::PopStyleColor(8);
 
+			//ImGui::PopStyleVar();
+
+			ImGui::PopStyleColor(11);
 
 			if (show_preferences)
 			{
-				//auto &io = ImGui::GetIO();
-				Preference(context, &show_preferences);
+				hiddengrip = false;
+					Preference(context, &show_preferences);
 			}
 			else
 			{
-				//auto &io = ImGui::GetIO();
-				// ignore Keyboard without preferences.
-				// TODO: reshade menu check.
-				//io.WantCaptureKeyboard = false;
+				hiddengrip = true;
 			}
+
 			mutex.unlock();
 		}
 

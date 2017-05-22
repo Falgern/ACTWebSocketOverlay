@@ -50,9 +50,33 @@ Library | Description
 
 
 
+
+
+## Build Tool
+Microsoft Visual Studio Community 2015
+
+## Build Instruction
+* boost build step
+    1. download https://dl.bintray.com/boostorg/release/1.64.0/source/:boost_1_64_0.7z
+    2. unzip
+    3. bootstrap.bat
+    4. b2 --stagedir=stage   variant=debug,release address-model=32 threading=multi link=static runtime-link=shared --prefix=c:/boost32 install
+    5. b2 --stagedir=stage64 variant=debug,release address-model=64 threading=multi link=static runtime-link=shared --prefix=c:/boost64 install
+
+* Texture build step
+    1. cd textures
+    2. gen_atlas.bat
+    
+* ACTWebSocketOverlay build step
+    1. configure.bat
+    2. build.bat
+
+    
 [ZCube/ACTWebSocketOverlay](https://github.com/ZCube/ACTWebSocketOverlay)
 
 ##
 
 NO WARRANTY. ANY USE OF THE SOFTWARE IS ENTIRELY AT YOUR OWN RISK.
+
+
 
