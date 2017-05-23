@@ -1368,7 +1368,14 @@ extern "C" int ModRender(ImGuiContext* context)
 			ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["GraphText"], text_opacity * global_opacity));
 			// Moved to top line
 			std::string duration_short = "- " + duration;
-			ImGui::Text(zone.c_str());
+			std::string zone_short = zone;
+			
+			if(zone.size() >22)
+			{
+				zone_short.resize(20);
+				zone_short = zone_short + "..";
+			}
+			ImGui::Text(zone_short.c_str());
 			ImGui::SameLine();
 			ImGui::Text(duration_short.c_str());
 			ImGui::SameLine();
