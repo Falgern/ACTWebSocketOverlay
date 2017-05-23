@@ -163,6 +163,7 @@ static std::vector<const char*> combatant_attribute_names;
 
 static float& global_opacity = opacity_map["Global"];
 static float& text_opacity = opacity_map["Text"];
+static float& titletext_opacity = opacity_map["TitleText"];
 static float& background_opacity = opacity_map["Background"];
 static float& title_background_opacity = opacity_map["TitleBackground"];
 static float& resizegrip_opacity = opacity_map["ResizeGrip"];
@@ -595,7 +596,7 @@ extern "C" int ModInit(ImGuiContext* context)
 
 	color_map["Sch"] = htmlCodeToImVec4("8657FF");
 
-	color_map["Ast"] = htmlCodeToImVec4("90CEB7");
+	color_map["Ast"] = htmlCodeToImVec4("FFF93C");
 
 	color_map["Rdm"] = htmlCodeToImVec4("cf2621");
 
@@ -622,6 +623,7 @@ extern "C" int ModInit(ImGuiContext* context)
 	resizegrip_opacity = 1.0f;
 	background_opacity = 1.0f;
 	text_opacity = 1.0f;
+	titletext_opacity = 1.0f;
 	graph_opacity = 1.0f;
 	//toolbar_opacity = 1.0f;
 
@@ -833,7 +835,6 @@ void RenderTableColumnHeader(Table& table, int height)
 	{
 		if (!table.columns[i].visible)
 			continue;
-		const ImGuiStyle& style = ImGui::GetStyle();
 		ImVec2 winpos = ImGui::GetWindowPos();
 		ImVec2 pos = ImGui::GetCursorPos();
 		pos = window->DC.CursorPos;
@@ -1334,13 +1335,15 @@ extern "C" int ModRender(ImGuiContext* context)
 			{
 				ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], 0.0f));
 			}
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 1.2f));
+
+			
 			ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, ColorWithAlpha(color_map["ResizeGripActive"], resizegrip_opacity));
 			ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, ColorWithAlpha(color_map["ResizeGripHovered"], resizegrip_opacity));
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5, 0.5, 0.5, background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3, 0.3, 0.3, background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0, 0.0, 0.0, 0.0f));
-			ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity));
-			ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0);
+			ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["TitleText"], titletext_opacity * global_opacity));
 			ImGui::Begin("DPSMeter", nullptr, ImVec2(630, 300), -1,
 				//ImGuiWindowFlags_NoTitleBar);
 				NULL);
@@ -1362,33 +1365,32 @@ extern "C" int ModRender(ImGuiContext* context)
 
 
 			mutex.lock();
-
+			ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["GraphText"], text_opacity * global_opacity));
 			// Moved to top line
 			std::string duration_short = "- " + duration;
 			ImGui::Text(zone.c_str());
 			ImGui::SameLine();
 			ImGui::Text(duration_short.c_str());
 			ImGui::SameLine();
-			ImGui::Text(("| Total DPS : " + rdps).c_str());
+			ImGui::Text(("| T.DPS : " + rdps).c_str());
 			ImGui::SameLine();
-			ImGui::Text(("Total HPS : " + rhps).c_str());
+			ImGui::Text(("T.HPS : " + rhps).c_str());
+			ImGui::PopStyleColor();
 
-
-
-			ImGui::SameLine(ImGui::GetWindowWidth() - 25);
+			// Give spacing for scroll
+			ImGui::SameLine(ImGui::GetWindowWidth() - 30);
 			Image& cog = overlay_images["cog"];
-			ImGui::BeginChild("cogbutton", ImVec2(27, 25), false, ImGuiWindowFlags_NoTitleBar);
+			ImGui::BeginChild("cogbutton", ImVec2(18, 18), false, NULL);
 			
-			if (ImGui::ImageButton(overlay_texture, ImVec2(27 / 2, 25 / 2), cog.uv0, cog.uv1, -1, ImVec4(0, 0, 0, 0), ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity)))
+			if (ImGui::ImageButton(overlay_texture, ImVec2(13.5f, 12.5f), cog.uv0, cog.uv1, -1, ImVec4(0, 0, 0, 0), ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity)))
 			{
-
 				show_preferences = !show_preferences;
 				
+				
 			}
-
+			
 			ImGui::EndChild();
 			//ImGui::PopStyleColor();
-
 			RenderTable(dealerTable);
 
 
@@ -1397,7 +1399,7 @@ extern "C" int ModRender(ImGuiContext* context)
 
 			ImGui::End();
 
-			//ImGui::PopStyleVar();
+			ImGui::PopStyleVar(1);
 
 			ImGui::PopStyleColor(11);
 
