@@ -995,7 +995,7 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 {
 
 
-	ImGui::Begin(" Preferences", show_preferences, ImVec2(500, 500), -1, ImGuiWindowFlags_NoCollapse);
+	ImGui::Begin("Preferences", show_preferences, ImVec2(500, 500), -1, ImGuiWindowFlags_NoCollapse);
 	{
 
 

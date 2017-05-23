@@ -6,8 +6,10 @@ A Modified version of ActWebSocket overlay utility based on ImGui
 *ActWebSocket needed.
 
 ## Screenshots
-![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot2.png)
+![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot.png)
 ![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot3.png)
+
+The font used in these screenshots is "Anonymous Pro Bold", you can get it here: [MarkSimonson.com](https://www.marksimonson.com/fonts/view/anonymous-pro)
 
 
 
@@ -71,7 +73,7 @@ Microsoft Visual Studio Community 2015
     1. configure.bat
     2. build.bat
 
-    
+
 [ZCube/ACTWebSocketOverlay](https://github.com/ZCube/ACTWebSocketOverlay)
 
 ##
