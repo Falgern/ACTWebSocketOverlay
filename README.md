@@ -30,7 +30,7 @@ Control + Scroll | Zoom.
 
 ## Screenshot
 ![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot.png)
-![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot2.png)
+![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot3.png)
 
 ## Font
 * Search Path
