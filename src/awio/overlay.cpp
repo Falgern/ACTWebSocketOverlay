@@ -1,4 +1,5 @@
-﻿#include <imgui.h>
+﻿#include "version.h"
+#include <imgui.h>
 #include "imgui_internal.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -21,8 +22,13 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/hex.hpp>
 
+// This source code seems to require refactoring. :<
+// Until then, focus on the features. I am not yet familiar with dear imgui.
+
+static boost::mutex font_mutex;
 static boost::mutex mutex;
 static bool initialized = false;
+std::unordered_map<ImGuiContext*, bool> font_inited;
 
 static bool show_name = true;
 
@@ -30,10 +36,46 @@ static char websocket_port[256] = { 0, };
 static void* overlay_texture = nullptr;
 static unsigned char *overlay_texture_filedata = nullptr;
 static int overlay_texture_width = 0, overlay_texture_height = 0, overlay_texture_channels = 0;
-static ImFont* largeFont;
+static ImFont* largeFont = nullptr;
 static ImFont* korFont = nullptr;
 static ImFont* japFont = nullptr;
+static bool need_font_init = true;
+
 static ImGuiWindowFlags window_flags = 0;
+
+class Serializable
+{
+public:
+	virtual void ToJson(Json::Value& value) const = 0;
+	virtual void FromJson(Json::Value& value) = 0;
+};
+
+class Font : public Serializable
+{
+public:
+	Font() {}
+	Font(std::string fontname, std::string glyph_range, float font_size)
+	{
+		this->fontname = fontname;
+		this->glyph_range = glyph_range;
+		this->font_size = font_size;
+	}
+	std::string fontname;
+	std::string glyph_range;
+	float font_size;
+	void ToJson(Json::Value& value) const
+	{
+		value["fontname"] = fontname;
+		value["glyph_range"] = glyph_range;
+		value["font_size"] = font_size;
+	}
+	void FromJson(Json::Value& value)
+	{
+		fontname = value["fontname"].asString();
+		glyph_range = value["glyph_range"].asString();
+		font_size = value["font_size"].asFloat();
+	}
+};
 
 class Image
 {
@@ -47,10 +89,20 @@ public:
 	std::vector<int> widths;
 	std::vector<int> heights;
 };
+
+static std::vector<Font> fonts;
 static std::unordered_map<std::string, Image> overlay_images;
 static std::map<std::string, std::vector<std::string>> color_category_map;
-
 static Json::Value overlay_atlas;
+static std::vector<const char*> glyph_range_key;
+static std::map<std::string, bool> boolean_map;
+static bool& show_status = boolean_map["ShowStatus"];
+static bool& show_status_samewindow = boolean_map["ShowStatusSameWindow"];
+static bool& movable = boolean_map["Movable"];
+// Basic bar configuration
+static std::vector<const char*> graph_bars;
+static std::string graph_bar;
+ 
 
 class Table
 {
@@ -60,7 +112,7 @@ public:
 	public:
 		ImVec4* color = nullptr;
 	};
-	class Column
+	class Column : public Serializable
 	{
 	public:
 		Column(std::string title_ = "", std::string index_ = "", int size_ = 0, int sizeWeight_ = 0, ImVec2 align_ = ImVec2(0.5f, 0.5f), bool visible_ = true)
@@ -100,8 +152,8 @@ public:
 
 	void UpdateColumnWidth(int width, int height, int column_max, float scale)
 	{
-		//if (columns.size() > 0)
-		//	columns[0].size = height / scale;
+		if (columns.size() > 0)
+			columns[0].size = height / scale;
 		int columnSizeWeightSum = 0;
 		int columnSizeFixed = 0;
 		for (int i = 0; i < column_max; ++i) {
@@ -123,9 +175,9 @@ public:
 				continue;
 			if (columns[i].sizeWeight != 0)
 			{
-				columns[i].size = std::max(0,((width - columnSizeFixed) * columns[i].sizeWeight) / columnSizeWeightSum) / scale;
+				columns[i].size = std::max(0, ((width - columnSizeFixed) * columns[i].sizeWeight) / columnSizeWeightSum) / scale;
 			}
-			columns[i].offset = offset + (column_margin) * scale;
+			columns[i].offset = offset + (column_margin)* scale;
 			offset += (columns[i].size + column_margin) * scale;
 		}
 
@@ -166,8 +218,8 @@ static float& text_opacity = opacity_map["Text"];
 static float& titletext_opacity = opacity_map["TitleText"];
 static float& background_opacity = opacity_map["Background"];
 static float& title_background_opacity = opacity_map["TitleBackground"];
+static float& toolbar_opacity = opacity_map["Toolbar"];
 static float& resizegrip_opacity = opacity_map["ResizeGrip"];
-//static float& toolbar_opacity = opacity_map["Toolbar"];
 static float& graph_opacity = opacity_map["Graph"];
 static bool hiddengrip = TRUE;
 static std::string default_pet_job;
@@ -190,555 +242,695 @@ const std::string ImVec4TohtmlCode(ImVec4 val)
 	return ret;
 }
 
-inline static void websocketThread()
+class WebSocket
 {
-	auto func = []()
+public:
+	WebSocket() {}
+	~WebSocket()
 	{
-		while (true)
+		loop = false;
+		if (websocket_thread)
 		{
-			boost::asio::io_service ios;
-			boost::asio::ip::tcp::resolver r{ ios };
-			try {
-				// localhost only !
-				std::string const host = "127.0.0.1";
-				boost::asio::ip::tcp::socket sock{ ios };
-				auto endpoint = r.resolve(boost::asio::ip::tcp::resolver::query{ host, websocket_port });
-				std::string s = endpoint->service_name();
-				uint16_t p = endpoint->endpoint().port();
-				boost::asio::connect(sock, endpoint);
+			websocket_thread->join();
+			websocket_thread.reset();
+		}
+	}
 
-				beast::websocket::stream<boost::asio::ip::tcp::socket&> ws{ sock };
-				std::string host_port = host + ":" + websocket_port;
-				ws.handshake(host_port, "/MiniParse");
+	bool loop = false;;
+	std::shared_ptr<std::thread> websocket_thread;
 
-				while (sock.is_open())
-				{
+	void Run()
+	{
+		auto func = [this]()
+		{
+			while (loop)
+			{
+				boost::asio::io_service ios;
+				boost::asio::ip::tcp::resolver r{ ios };
+				try {
+					// localhost only !
+					std::string const host = "127.0.0.1";
+					boost::asio::ip::tcp::socket sock{ ios };
+					auto endpoint = r.resolve(boost::asio::ip::tcp::resolver::query{ host, websocket_port });
+					std::string s = endpoint->service_name();
+					uint16_t p = endpoint->endpoint().port();
+					boost::asio::connect(sock, endpoint);
 
-					beast::multi_buffer b;
-					beast::websocket::opcode op;
-					ws.read(op, b);
+					beast::websocket::stream<boost::asio::ip::tcp::socket&> ws{ sock };
+					std::string host_port = host + ":" + websocket_port;
+					ws.handshake(host_port, "/MiniParse");
 
-					std::string message_str;
-					message_str = boost::lexical_cast<std::string>(beast::buffers(b.data()));
-					// debug
-					//std::cout << beast::buffers(b.data()) << "\n";
-					b.consume(b.size());
-					if (message_str.size() == 1)
+					while (sock.is_open() && loop)
 					{
-						ws.write(boost::asio::buffer(std::string(".")));
-					}
-					else
-					{
+						beast::multi_buffer b;
+						beast::websocket::opcode op;
+						ws.read(op, b);
+
+						std::string message_str;
+						message_str = boost::lexical_cast<std::string>(beast::buffers(b.data()));
+						// debug
+						//std::cout << beast::buffers(b.data()) << "\n";
+						b.consume(b.size());
+						if (message_str.size() == 1)
 						{
-							Json::Value root;
-							Json::Reader r;
-
-							if (r.parse(message_str, root))
+							ws.write(boost::asio::buffer(std::string(".")));
+						}
+						else
+						{
 							{
-								std::vector<Table::Row> _rows;
-								std::vector<std::vector<std::string> > _values;
-								if (root["type"].asString() == "broadcast" && root["msgtype"].asString() == "CombatData")
+								Json::Value root;
+								Json::Reader r;
+
+								if (r.parse(message_str, root))
 								{
-									float _maxValue = 0;
-									mutex.lock();
-									Table& table = dealerTable;
+									std::vector<Table::Row> _rows;
+									std::vector<std::vector<std::string> > _values;
+									if (root["type"].asString() == "broadcast" && root["msgtype"].asString() == "CombatData")
 									{
-										_values.clear();
-										Json::Value combatant = root["msg"]["Combatant"];
-										Json::Value encounter = root["msg"]["Encounter"];
-
-										rdps = encounter["encdps"].asString();
-										rhps = encounter["enchps"].asString();
-
-										zone = encounter["CurrentZoneName"].asString();
-										duration = encounter["duration"].asString();
-
-										for (auto i = combatant.begin(); i != combatant.end(); ++i)
+										float _maxValue = 0;
+										mutex.lock();
+										Table& table = dealerTable;
 										{
-											std::vector<std::string> vals;
-											for (int j = 0; j < table.columns.size(); ++j)
+											_values.clear();
+											Json::Value combatant = root["msg"]["Combatant"];
+											Json::Value encounter = root["msg"]["Encounter"];
+
+											rdps = encounter["encdps"].asString();
+											rhps = encounter["enchps"].asString();
+
+											zone = encounter["CurrentZoneName"].asString();
+											duration = encounter["duration"].asString();
+
+											for (auto i = combatant.begin(); i != combatant.end(); ++i)
 											{
-												vals.push_back((*i)[table.columns[j].index].asString());
-											}
-											_maxValue = std::max<float>(atof(vals[table.progressColumn].c_str()), _maxValue);
-											
-											_values.push_back(vals);
-										}
-
-										// sort first
-										std::sort(_values.begin(), _values.end(), [](const std::vector<std::string>& vals0, const std::vector<std::string>& vals1)
-										{
-											return atof(vals0[2].c_str()) > atof(vals1[2].c_str());
-										});
-
-										for (auto i = 0; i < _values.size(); ++i)
-										{
-											auto vals = _values[i];
-											Table::Row row;
-											{
-												std::string& jobStr = vals[0];
-												const std::string& progressStr = vals[2];
-												std::string& nameStr = vals[1];
-												if (jobStr.empty())
+												std::vector<std::string> vals;
+												for (int j = 0; j < table.columns.size(); ++j)
 												{
-													std::string jobStrAlter;
-													typedef std::vector< std::string > split_vector_type;
-													split_vector_type splitVec; // #2: Search for tokens
-													boost::split(splitVec, nameStr, boost::is_any_of("()"), boost::token_compress_on);
-													if (splitVec.size() >= 1)
+													vals.push_back((*i)[table.columns[j].index].asString());
+												}
+												_maxValue = std::max<float>(atof(vals[table.progressColumn].c_str()), _maxValue);
+
+												_values.push_back(vals);
+											}
+
+											// sort first
+											std::sort(_values.begin(), _values.end(), [](const std::vector<std::string>& vals0, const std::vector<std::string>& vals1)
+											{
+												return atof(vals0[2].c_str()) > atof(vals1[2].c_str());
+											});
+
+											for (auto i = 0; i < _values.size(); ++i)
+											{
+												auto& vals = _values[i];
+												Table::Row row;
+												{
+													std::string& jobStr = vals[0];
+													const std::string& progressStr = vals[2];
+													std::string& nameStr = vals[1];
+													if (jobStr.empty())
 													{
-														boost::trim(splitVec[0]);
-														auto i = name_to_job_map.find(splitVec[0]);
-														if (i != name_to_job_map.end())
+														std::string jobStrAlter;
+														typedef std::vector< std::string > split_vector_type;
+														split_vector_type splitVec; // #2: Search for tokens
+														boost::split(splitVec, nameStr, boost::is_any_of("()"), boost::token_compress_on);
+														if (splitVec.size() >= 1)
 														{
-															jobStr = i->second;
-														}
-														else if (splitVec.size() > 1)
-														{
-															jobStr = default_pet_job;
+															boost::trim(splitVec[0]);
+															auto i = name_to_job_map.find(splitVec[0]);
+															if (i != name_to_job_map.end())
+															{
+																jobStr = i->second;
+															}
+															else if (splitVec.size() > 1)
+															{
+																jobStr = default_pet_job;
+															}
 														}
 													}
-												}
 
-												ColorMapType::iterator ji;
+													ColorMapType::iterator ji;
 
-												// name and job
-												if ((ji = color_map.find(nameStr)) != color_map.end())
-												{
-													row.color = &ji->second;
-												}
-												else
-												{
-													if ((ji = color_map.find(jobStr)) != color_map.end())
+													// name and job
+													if ((ji = color_map.find(nameStr)) != color_map.end())
 													{
 														row.color = &ji->second;
 													}
 													else
 													{
-														row.color = &color_map["etc"];
+														if ((ji = color_map.find(jobStr)) != color_map.end())
+														{
+															row.color = &ji->second;
+														}
+														else
+														{
+															row.color = &color_map["etc"];
+														}
 													}
+													_rows.push_back(row);
 												}
-												_rows.push_back(row);
 											}
 										}
+										dealerTable.rows = _rows;
+										dealerTable.values = _values;
+										dealerTable.maxValue = _maxValue;
+										mutex.unlock();
 									}
-									dealerTable.rows = _rows;
-									dealerTable.values = _values;
-									dealerTable.maxValue = _maxValue;
-									mutex.unlock();
 								}
 							}
 						}
 					}
 				}
-			}
-			catch (std::exception& e)
-			{
-				std::cerr << e.what() << std::endl;
-			}
-			catch (...)
-			{
+				catch (std::exception& e)
+				{
+					std::cerr << e.what() << std::endl;
+				}
+				catch (...)
+				{
 
+				}
+				if (!loop)
+					break;
+				for (int i = 0; i<50 && loop; ++i)
+					Sleep(100);
+				if (!loop)
+					break;
 			}
-			Sleep(5000);
-		}
-	};
-	std::thread* t(new std::thread(func));
+		};
+		loop = false;
+		if (websocket_thread)
+			websocket_thread->join();
+		loop = true;
+		websocket_thread = std::make_shared<std::thread>(func);
+	}
+};
+
+static WebSocket websocket;
+
+inline static void websocketThread()
+{
+	// only one.
+	if (!websocket.websocket_thread)
+		websocket.Run();
 }
 
 extern "C" int ModInit(ImGuiContext* context)
 {
-	ImGui::SetCurrentContext(context);
-	WCHAR result[MAX_PATH] = {};
-	GetWindowsDirectoryW(result, MAX_PATH);
-	boost::filesystem::path p = result;
+	boost::unique_lock<boost::mutex> l(font_mutex);
+	need_font_init = true;
 
-	GetModuleFileNameW(NULL, result, MAX_PATH);
-	boost::filesystem::path m = result;
+	try {
+		ImGui::SetCurrentContext(context);
+		WCHAR result[MAX_PATH] = {};
+		GetWindowsDirectoryW(result, MAX_PATH);
+		boost::filesystem::path p = result;
 
-	// texture
-	boost::filesystem::path texture_path = m.parent_path() / "overlay_atlas.png";
-	boost::filesystem::path atlas_json_path = m.parent_path() / "overlay_atlas.json";
-	if (boost::filesystem::exists(texture_path))
-	{
-		FILE *file;
-		bool success = false;
-
-		if (_wfopen_s(&file, texture_path.wstring().c_str(), L"rb") == 0)
-		{
-			overlay_texture_filedata = stbi_load_from_file(file, &overlay_texture_width, &overlay_texture_height, &overlay_texture_channels, STBI_rgb_alpha);
-			fclose(file);
-		}
-	}
-	if (boost::filesystem::exists(atlas_json_path) && overlay_texture_width > 0 && overlay_texture_height > 0)
-	{
-		FILE *file;
-		bool success = false;
-
-		std::ifstream fin(atlas_json_path.wstring().c_str());
-		if (fin.is_open())
-		{
-			Json::Reader r;
-			if (r.parse(fin, overlay_atlas))
-			{
-				for (auto i = overlay_atlas.begin(); i != overlay_atlas.end(); ++i)
-				{
-					std::string name = boost::to_lower_copy(i.key().asString());
-					boost::replace_all(name, ".png", "");
-					Image im;
-					im.x = (*i)["left"].asInt();
-					im.y = (*i)["top"].asInt();
-					im.width = (*i)["width"].asInt();
-					im.height = (*i)["height"].asInt();
-					im.uv0 = ImVec2(((float)im.x + 0.5f) / (float)overlay_texture_width,
-						((float)im.y + 0.5f) / (float)overlay_texture_width);
-					im.uv1 = ImVec2((float)(im.x + im.width - 1 + 0.5f) / (float)overlay_texture_width,
-						(float)(im.y + im.height - 1 + 0.5f) / (float)overlay_texture_width);
-					overlay_images[name] = im;
-				}
-			}
-		}
-	}
-
-	// font
-	ImGuiIO& io = ImGui::GetIO();
-
-	ImFontConfig config;
-	config.MergeMode = false;
-	ImFontConfig configMerge;
-	configMerge.MergeMode = true;
-	if (boost::filesystem::exists(m.parent_path() / "Font.ttf"))
-	{
-		io.Fonts->AddFontFromFileTTF((m.parent_path() / "Font.ttf").string().c_str(), 15.0f, &config);
-	}
-	else
-	{
-		ImGui::GetIO().Fonts->AddFontDefault();
-	}
-	struct stat buffer;
-
-	static const ImWchar ranges[] =
-	{
-		0x25A0, 0x25FF,
-		0,
-	};
-
-	// font loading order...
-	//// latin only [0-9a-zA-Z else]?
-	if (boost::filesystem::exists(p / "Fonts" / "ArialUni.ttf"))
-		japFont = io.Fonts->AddFontFromFileTTF((p / "Fonts" / "ArialUni.ttf").string().c_str(), 15.0f, &configMerge, io.Fonts->GetGlyphRangesJapanese());
-	if (boost::filesystem::exists(m.parent_path() / "NanumBarunGothic.ttf"))
-		korFont = io.Fonts->AddFontFromFileTTF((m.parent_path() / "NanumBarunGothic.ttf").string().c_str(), 15.0f, &configMerge, io.Fonts->GetGlyphRangesKorean());
-	else if (boost::filesystem::exists(p / "Fonts" / "NanumBarunGothic.ttf"))
-		korFont = io.Fonts->AddFontFromFileTTF((p / "Fonts" / "NanumBarunGothic.ttf").string().c_str(), 15.0f, &configMerge, io.Fonts->GetGlyphRangesKorean());
-	else if (boost::filesystem::exists(p / "Fonts" / "gulim.ttc"))
-		korFont = io.Fonts->AddFontFromFileTTF((p / "Fonts" / "gulim.ttc").string().c_str(), 13.0f, &configMerge, io.Fonts->GetGlyphRangesKorean());
-
-	// DX9 error problem..
-	//if (boost::filesystem::exists(p / "Fonts" / "consolab.ttf"))
-	//	largeFont = io.Fonts->AddFontFromFileTTF((p / "Fonts" / "consolab.ttf").string().c_str(), 25.0f, &config, io.Fonts->GetGlyphRangesDefault());
-
-	if (initialized)
-		return true;
-
-
-	dealerTable.columns.push_back(Table::Column("", "Job", (overlay_texture != nullptr) ? 30 : 20, 0, ImVec2(0.5f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("Name", "name", 0, 2, ImVec2(0.1f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("D%", "damage%", 30, 0, ImVec2(0.2f, 0.5f)));
-	dealerTable.columns.back().visible = false;
-	// modify
-	dealerTable.columns.push_back(Table::Column("D%", "damage%", 30, 0, ImVec2(0.2f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("DPS", "encdps", 40, 1, ImVec2(0.2f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("D.Tot", "damage", 60, 1, ImVec2(0.2f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("Crit", "crithit%", 30, 1, ImVec2(0.2f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("HPS", "enchps", 40, 1, ImVec2(0.2f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("H.Tot", "healed", 60, 1, ImVec2(0.2f, 0.5f)));
-	dealerTable.columns.push_back(Table::Column("Miss", "misses", 28, 0, ImVec2(0.2f, 0.5f)));
-	// Color category
-	color_category_map["Tank"].push_back("Pld");
-	color_category_map["Tank"].push_back("Gld");
-	color_category_map["Tank"].push_back("War");
-	color_category_map["Tank"].push_back("Mrd");
-	color_category_map["Tank"].push_back("Drk");
-
-	color_category_map["DPS"].push_back("Mnk");
-	color_category_map["DPS"].push_back("Pgl");
-	color_category_map["DPS"].push_back("Drg");
-	color_category_map["DPS"].push_back("Lnc");
-	color_category_map["DPS"].push_back("Nin");
-	color_category_map["DPS"].push_back("Rog");
-	color_category_map["DPS"].push_back("Brd");
-	color_category_map["DPS"].push_back("Arc");
-	color_category_map["DPS"].push_back("Mch");
-	color_category_map["DPS"].push_back("Blm");
-	color_category_map["DPS"].push_back("Thm");
-	color_category_map["DPS"].push_back("Smn");
-	color_category_map["DPS"].push_back("Acn");
-
-	color_category_map["DPS"].push_back("Sam");
-	color_category_map["DPS"].push_back("Rdm");
-
-
-	color_category_map["Healer"].push_back("Whm");
-	color_category_map["Healer"].push_back("Cnj");
-	color_category_map["Healer"].push_back("Sch");
-	color_category_map["Healer"].push_back("Ast");
-
-	color_category_map["Etc"].push_back("limit break");
-	color_category_map["Etc"].push_back("YOU");
-	color_category_map["Etc"].push_back("etc");
-
-	color_category_map["UI"].push_back("Background");
-	color_category_map["UI"].push_back("TitleBackground");
-	color_category_map["UI"].push_back("TitleBackgroundActive");
-	color_category_map["UI"].push_back("TitleBackgroundCollapsed");
-	color_category_map["UI"].push_back("ResizeGrip");
-	color_category_map["UI"].push_back("ResizeGripActive");
-	color_category_map["UI"].push_back("ResizeGripHovered");
-	color_category_map["UI"].push_back("TitleText");
-	color_category_map["UI"].push_back("GraphText");
-	//color_category_map["UI"].push_back("ToolbarBackground");
-
-	// name to job map
-
-	//rook
-	name_to_job_map[u8"auto-tourelle tour"] =
-		name_to_job_map[u8"selbstschuss-gyrocopter läufer"] =
-		name_to_job_map[u8"オートタレット・ルーク"] =
-		name_to_job_map[u8"자동포탑 룩"] =
-		name_to_job_map[u8"rook autoturret"] =
-		"rook";
-	//bishop
-	name_to_job_map[u8"auto-tourelle fou"] =
-		name_to_job_map[u8"selbstschuss-gyrocopter turm"] =
-		name_to_job_map[u8"オートタレット・ビショップ"] =
-		name_to_job_map[u8"자동포탑 비숍"] =
-		name_to_job_map[u8"bishop autoturret"] =
-		"bishop";
-	//emerald
-	name_to_job_map[u8"emerald carbuncle"] =
-		name_to_job_map[u8"카벙클 에메랄드"] =
-		name_to_job_map[u8"カーバンクル・エメラルド"] =
-		"emerald";
-	//topaz
-	name_to_job_map[u8"topaz carbuncle"] =
-		name_to_job_map[u8"카벙클 토파즈"] =
-		name_to_job_map[u8"カーバンクル・トパーズ"] =
-		"topaz";
-	//eos
-	name_to_job_map[u8"eos"] =
-		name_to_job_map[u8"フェアリー・エオス"] =
-		name_to_job_map[u8"요정 에오스"] =
-		"eos";
-	//selene
-	name_to_job_map[u8"selene"] =
-		name_to_job_map[u8"フェアリー・セレネ"] =
-		name_to_job_map[u8"요정 셀레네"] =
-		"selene";
-	//garuda
-	name_to_job_map[u8"garuda-egi"] =
-		name_to_job_map[u8"ガルーダ・エギ"] =
-		name_to_job_map[u8"가루다 에기"] =
-		"garuda";
-	//ifrit
-	name_to_job_map[u8"ifrit-egi"] =
-		name_to_job_map[u8"イフリート・エギ"] =
-		name_to_job_map[u8"이프리트 에기"] =
-		"ifrit";
-	//titan
-	name_to_job_map[u8"titan-egi"] =
-		name_to_job_map[u8"タイタン・エギ"] =
-		name_to_job_map[u8"타이탄 에기"] =
-		"titan";
-
-	name_to_job_map[u8"Limit Break"] = "limit break";
-
-	// default color map
-	color_map["TitleText"] = htmlCodeToImVec4("ffffff");
-	color_map["GraphText"] = htmlCodeToImVec4("ffffff");
-
-
-	color_map["DPS"] = htmlCodeToImVec4("ff0000");
-	color_map["Healer"] = htmlCodeToImVec4("00ff00");
-	color_map["Tank"] = htmlCodeToImVec4("0000ff");
-
-	color_map["Pld"] = htmlCodeToImVec4("A8D2E6");
-	color_map["Gld"] = htmlCodeToImVec4("A8D2E6");
-
-	color_map["War"] = htmlCodeToImVec4("edc294");
-	color_map["Mrd"] = htmlCodeToImVec4("edc294");
-
-	color_map["Drk"] = htmlCodeToImVec4("d126cc");
-
-	color_map["Mnk"] = htmlCodeToImVec4("d69c00");
-	color_map["Pgl"] = htmlCodeToImVec4("d69c00");
-
-	color_map["Drg"] = htmlCodeToImVec4("4164CD");
-	color_map["Lnc"] = htmlCodeToImVec4("4164CD");
-
-	color_map["Nin"] = htmlCodeToImVec4("AF1964");
-	color_map["Rog"] = htmlCodeToImVec4("AF1964");
-
-	color_map["Brd"] = htmlCodeToImVec4("394925");
-	color_map["Arc"] = htmlCodeToImVec4("394925");
-
-	color_map["Mch"] = htmlCodeToImVec4("6EE1D6");
-
-	color_map["Blm"] = htmlCodeToImVec4("A579D6");
-	color_map["Thm"] = htmlCodeToImVec4("A579D6");
-
-
-	color_map["Whm"] = htmlCodeToImVec4("FFF0DC");
-	color_map["Cnj"] = htmlCodeToImVec4("FFF0DC");
-
-	color_map["Smn"] = htmlCodeToImVec4("2D9B78");
-	color_map["Acn"] = htmlCodeToImVec4("2D9B78");
-
-	color_map["Sch"] = htmlCodeToImVec4("8657FF");
-
-	color_map["Ast"] = htmlCodeToImVec4("FFF93C");
-
-	color_map["Rdm"] = htmlCodeToImVec4("cf2621");
-
-	color_map["Sam"] = htmlCodeToImVec4("88e09e");
-	color_map["Limit Break"] = htmlCodeToImVec4("FFBB00");
-
-	color_map["YOU"] = htmlCodeToImVec4("FF5722");
-
-	color_map["Background"] = htmlCodeToImVec4("000000");
-	color_map["Background"].w = 0.5;
-
-	color_map["TitleBackground"] = ImGui::GetStyle().Colors[ImGuiCol_TitleBg];
-	color_map["TitleBackgroundActive"] = ImGui::GetStyle().Colors[ImGuiCol_TitleBgActive];
-	color_map["TitleBackgroundCollapsed"] = ImGui::GetStyle().Colors[ImGuiCol_TitleBgCollapsed];
-
-	color_map["ResizeGrip"] = ImGui::GetStyle().Colors[ImGuiCol_ResizeGrip];
-
-
-	default_pet_job = "chocobo";
-
-	//opacity
-	global_opacity = 1.0f;
-	title_background_opacity = 1.0f;
-	resizegrip_opacity = 1.0f;
-	background_opacity = 1.0f;
-	text_opacity = 1.0f;
-	titletext_opacity = 1.0f;
-	graph_opacity = 1.0f;
-	//toolbar_opacity = 1.0f;
-
-	//combatant attributes
-	combatant_attribute_names = {
-		"absorbHeal",
-		"BlockPct",
-		"critheal%",
-		"critheals",
-		"crithit%",
-		"crithits",
-		"cures",
-		"damage",
-		"damage%",
-		"DAMAGE-k",
-		"DAMAGE-m",
-		"damageShield",
-		"damagetaken",
-		"deaths",
-		"dps",
-		"DPS-k",
-		"duration",
-		"encdps",
-		"ENCDPS-k",
-		"enchps",
-		"ENCHPS-k",
-		"healed",
-		"healed%",
-		"heals",
-		"healstaken",
-		"hitfailed",
-		"hits",
-		"IncToHit",
-		"Job",
-		"kills",
-		"Last10DPS",
-		"Last180DPS",
-		"Last30DPS",
-		"Last60DPS",
-		"MAXHEAL",
-		"MAXHEALWARD",
-		"MAXHIT",
-		"misses",
-		"overHeal",
-		"OverHealPct",
-		"ParryPct",
-		"powerdrain",
-		"powerheal",
-		"swings",
-		"threatdelta",
-		"threatstr",
-		"TOHIT" };
-
-	// default port
-	strcpy(websocket_port, "10501");
-
-	{
 		GetModuleFileNameW(NULL, result, MAX_PATH);
 		boost::filesystem::path m = result;
 
-		Json::Reader r;
-		Json::Value setting;
-		try {
-			std::ifstream fin((m.parent_path() / "mod.json").wstring());
-			if (r.parse(fin, setting))
+		// texture
+		boost::filesystem::path texture_path = m.parent_path() / "overlay_atlas.png";
+		boost::filesystem::path atlas_json_path = m.parent_path() / "overlay_atlas.json";
+		if (!overlay_texture_filedata)
+		{
+			if (boost::filesystem::exists(texture_path))
 			{
-				show_name = setting.get("show_name", true).asBool();
-				default_pet_job = setting.get("default_pet_job", default_pet_job).asString();
-				strcpy(websocket_port, setting.get("websocket_port", "10501").asCString());
-				Json::Value color = setting.get("color_map", Json::Value());
-				for (auto i = color.begin(); i != color.end(); ++i)
+				FILE *file;
+				bool success = false;
+
+				if (_wfopen_s(&file, texture_path.wstring().c_str(), L"rb") == 0)
 				{
-					color_map[i.key().asString()] = htmlCodeToImVec4(i->asString());
+					overlay_texture_filedata = stbi_load_from_file(file, &overlay_texture_width, &overlay_texture_height, &overlay_texture_channels, STBI_rgb_alpha);
+					fclose(file);
 				}
-				Json::Value opacity = setting.get("opacity_map", Json::Value());
-				for (auto i = opacity.begin(); i != opacity.end(); ++i)
+			}
+		}
+		if (boost::filesystem::exists(atlas_json_path) && overlay_texture_width > 0 && overlay_texture_height > 0)
+		{
+			FILE *file;
+			bool success = false;
+
+			std::ifstream fin(atlas_json_path.wstring().c_str());
+			if (fin.is_open())
+			{
+				Json::Reader r;
+				if (r.parse(fin, overlay_atlas))
 				{
-					opacity_map[i.key().asString()] = i->asFloat();
-				}
-				Json::Value nameToJob = setting.get("name_to_job", Json::nullValue);
-				std::string name_to_job_str = "name_to_job";
-				if (nameToJob.find(&*name_to_job_str.begin(), &*name_to_job_str.begin() + name_to_job_str.size()) != nullptr)
-				{
-					name_to_job_map.clear();
-					for (auto i = nameToJob.begin();
-						i != nameToJob.end();
-						++i)
+					for (auto i = overlay_atlas.begin(); i != overlay_atlas.end(); ++i)
 					{
-						name_to_job_map[i.key().asString()] = i->asString();
-					}
-				}
-				Json::Value dealer_columns = setting.get("dealer_columns", Json::nullValue);
-				std::string dealer_columns_str = "dealer_columns";
-				if (setting.find(&*dealer_columns_str.begin(), &*dealer_columns_str.begin() + dealer_columns_str.size()) != nullptr)
-				{
-					dealerTable.columns.resize(3);
-					for (auto i = dealer_columns.begin();
-						i != dealer_columns.end();
-						++i)
-					{
-						Table::Column col;
-						col.FromJson(*i);
-						dealerTable.columns.push_back(col);
+						std::string name = boost::to_lower_copy(i.key().asString());
+						boost::replace_all(name, ".png", "");
+						Image im;
+						im.x = (*i)["left"].asInt();
+						im.y = (*i)["top"].asInt();
+						im.width = (*i)["width"].asInt();
+						im.height = (*i)["height"].asInt();
+						im.uv0 = ImVec2(((float)im.x + 0.5f) / (float)overlay_texture_width,
+							((float)im.y + 0.5f) / (float)overlay_texture_width);
+						im.uv1 = ImVec2((float)(im.x + im.width - 1 + 0.5f) / (float)overlay_texture_width,
+							(float)(im.y + im.height - 1 + 0.5f) / (float)overlay_texture_width);
+						overlay_images[name] = im;
 					}
 				}
 			}
-			fin.close();
 		}
-		catch (...)
+
+		dealerTable.columns = {
+			// fixed
+			Table::Column("", "Job", (overlay_texture != nullptr) ? 30 : 20, 0, ImVec2(0.5f, 0.5f)),
+			Table::Column("Name", "name", 0, 1, ImVec2(0.0f, 0.5f)),
+			Table::Column("DPS", "encdps", 50, 0, ImVec2(1.0f, 0.5f), false),
+			// modify
+			Table::Column("D%", "damage%", 50, 0, ImVec2(1.0f, 0.5f)),
+			Table::Column("DPS", "encdps", 40, 0, ImVec2(1.0f, 0.5f)),
+			Table::Column("D.Tot", "damage", 50, 0, ImVec2(1.0f, 0.5f)),
+			Table::Column("Swing", "swings", 40, 0, ImVec2(1.0f, 0.5f)),
+			Table::Column("Miss", "misses", 40, 0, ImVec2(1.0f, 0.5f)),
+			Table::Column("D.CRIT", "crithit%", 40, 0, ImVec2(1.0f, 0.5f)),
+			Table::Column("Death", "deaths", 40, 0, ImVec2(1.0f, 0.5f)),
+		};
+		// Color category
+		color_category_map["Tank"] = {
+			"Pld",
+			"Gld",
+			"War",
+			"Mrd",
+			"Drk",
+		};
+		color_category_map["DPS"] = {
+			"Mnk",
+			"Pgl",
+			"Drg",
+			"Lnc",
+			"Nin",
+			"Rog",
+			"Brd",
+			"Arc",
+			"Mch",
+			"Blm",
+			"Thm",
+			"Smn",
+			"Acn",
+			"Sam",
+			"Rdm",
+		};
+		color_category_map["Healer"] = {
+			"Whm",
+			"Cnj",
+			"Sch",
+			"Ast"
+		};
+		color_category_map["Etc"] = {
+			"limit break",
+			"YOU",
+			"etc"
+		};
+		color_category_map["UI"] = {
+			"Background",
+			"TitleBackground",
+			"TitleBackgroundActive",
+			"TitleBackgroundCollapsed",
+			"ResizeGrip",
+			"ResizeGripActive",
+			"ResizeGripHovered",
+			"TitleText",
+			"GraphText",
+			"ToolbarBackground"
+		};
+
+		// name to job map
+
+		//rook
+		name_to_job_map[u8"auto-tourelle tour"] =
+			name_to_job_map[u8"selbstschuss-gyrocopter läufer"] =
+			name_to_job_map[u8"オートタレット・ルーク"] =
+			name_to_job_map[u8"자동포탑 룩"] =
+			name_to_job_map[u8"rook autoturret"] =
+			"rook";
+		//bishop
+		name_to_job_map[u8"auto-tourelle fou"] =
+			name_to_job_map[u8"selbstschuss-gyrocopter turm"] =
+			name_to_job_map[u8"オートタレット・ビショップ"] =
+			name_to_job_map[u8"자동포탑 비숍"] =
+			name_to_job_map[u8"bishop autoturret"] =
+			"bishop";
+		//emerald
+		name_to_job_map[u8"emerald carbuncle"] =
+			name_to_job_map[u8"카벙클 에메랄드"] =
+			name_to_job_map[u8"カーバンクル・エメラルド"] =
+			"emerald";
+		//topaz
+		name_to_job_map[u8"topaz carbuncle"] =
+			name_to_job_map[u8"카벙클 토파즈"] =
+			name_to_job_map[u8"カーバンクル・トパーズ"] =
+			"topaz";
+		//eos
+		name_to_job_map[u8"eos"] =
+			name_to_job_map[u8"フェアリー・エオス"] =
+			name_to_job_map[u8"요정 에오스"] =
+			"eos";
+		//selene
+		name_to_job_map[u8"selene"] =
+			name_to_job_map[u8"フェアリー・セレネ"] =
+			name_to_job_map[u8"요정 셀레네"] =
+			"selene";
+		//garuda
+		name_to_job_map[u8"garuda-egi"] =
+			name_to_job_map[u8"ガルーダ・エギ"] =
+			name_to_job_map[u8"가루다 에기"] =
+			"garuda";
+		//ifrit
+		name_to_job_map[u8"ifrit-egi"] =
+			name_to_job_map[u8"イフリート・エギ"] =
+			name_to_job_map[u8"이프리트 에기"] =
+			"ifrit";
+		//titan
+		name_to_job_map[u8"titan-egi"] =
+			name_to_job_map[u8"タイタン・エギ"] =
+			name_to_job_map[u8"타이탄 에기"] =
+			"titan";
+
+		name_to_job_map[u8"Limit Break"] = "limit break";
+
+		// default color map
+		color_map["TitleText"] = htmlCodeToImVec4("ffffff");
+		color_map["GraphText"] = htmlCodeToImVec4("ffffff");
+		color_map["ToolbarBackground"] = htmlCodeToImVec4("999999");
+
+		color_map["DPS"] = htmlCodeToImVec4("ff0000");
+		color_map["Healer"] = htmlCodeToImVec4("00ff00");
+		color_map["Tank"] = htmlCodeToImVec4("0000ff");
+
+
+		color_map["Pld"] = htmlCodeToImVec4("A8D2E6");
+		color_map["Gld"] = htmlCodeToImVec4("A8D2E6");
+
+		color_map["War"] = htmlCodeToImVec4("edc294");
+		color_map["Mrd"] = htmlCodeToImVec4("edc294");
+
+		color_map["Drk"] = htmlCodeToImVec4("d126cc");
+
+		color_map["Mnk"] = htmlCodeToImVec4("d69c00");
+		color_map["Pgl"] = htmlCodeToImVec4("d69c00");
+
+		color_map["Drg"] = htmlCodeToImVec4("4164CD");
+		color_map["Lnc"] = htmlCodeToImVec4("4164CD");
+
+		color_map["Nin"] = htmlCodeToImVec4("AF1964");
+		color_map["Rog"] = htmlCodeToImVec4("AF1964");
+
+		color_map["Brd"] = htmlCodeToImVec4("394925");
+		color_map["Arc"] = htmlCodeToImVec4("394925");
+
+		color_map["Mch"] = htmlCodeToImVec4("6EE1D6");
+
+		color_map["Blm"] = htmlCodeToImVec4("A579D6");
+		color_map["Thm"] = htmlCodeToImVec4("A579D6");
+
+
+		color_map["Whm"] = htmlCodeToImVec4("FFF0DC");
+		color_map["Cnj"] = htmlCodeToImVec4("FFF0DC");
+
+		color_map["Smn"] = htmlCodeToImVec4("2D9B78");
+		color_map["Acn"] = htmlCodeToImVec4("2D9B78");
+
+		color_map["Sch"] = htmlCodeToImVec4("8657FF");
+
+		color_map["Ast"] = htmlCodeToImVec4("FFF93C");
+
+		color_map["Rdm"] = htmlCodeToImVec4("cf2621");
+
+		color_map["Sam"] = htmlCodeToImVec4("88e09e");
+		color_map["Limit Break"] = htmlCodeToImVec4("FFBB00");
+
+		color_map["YOU"] = htmlCodeToImVec4("FF5722");
+
+		color_map["Background"] = htmlCodeToImVec4("000000");
+		color_map["Background"].w = 0.5;
+
+		color_map["TitleBackground"] = ImGui::GetStyle().Colors[ImGuiCol_TitleBg];
+		color_map["TitleBackgroundActive"] = ImGui::GetStyle().Colors[ImGuiCol_TitleBgActive];
+		color_map["TitleBackgroundCollapsed"] = ImGui::GetStyle().Colors[ImGuiCol_TitleBgCollapsed];
+
+		color_map["ResizeGrip"] = ImGui::GetStyle().Colors[ImGuiCol_ResizeGrip];
+
+
+		default_pet_job = "chocobo";
+		graph_bar = "flat";
+
+		//opacity
+		global_opacity = 1.0f;
+		title_background_opacity = 1.0f;
+		resizegrip_opacity = 1.0f;
+		background_opacity = 1.0f;
+		text_opacity = 1.0f;
+		titletext_opacity = 1.0f;
+		graph_opacity = 1.0f;
+		toolbar_opacity = 1.0f;
+
+		//combatant attributes
+		combatant_attribute_names = {
+			"absorbHeal",
+			"BlockPct",
+			"critheal%",
+			"critheals",
+			"crithit%",
+			"crithits",
+			"cures",
+			"damage",
+			"damage%",
+			"DAMAGE-k",
+			"DAMAGE-m",
+			"damageShield",
+			"damagetaken",
+			"deaths",
+			"dps",
+			"DPS-k",
+			"duration",
+			"encdps",
+			"ENCDPS-k",
+			"enchps",
+			"ENCHPS-k",
+			"healed",
+			"healed%",
+			"heals",
+			"healstaken",
+			"hitfailed",
+			"hits",
+			"IncToHit",
+			"Job",
+			"kills",
+			"Last10DPS",
+			"Last180DPS",
+			"Last30DPS",
+			"Last60DPS",
+			"MAXHEAL",
+			"MAXHEALWARD",
+			"MAXHIT",
+			"misses",
+			"overHeal",
+			"OverHealPct",
+			"ParryPct",
+			"powerdrain",
+			"powerheal",
+			"swings",
+			"threatdelta",
+			"threatstr",
+			"TOHIT" };
+
+		// font setting
+		fonts = {
+			Font("consolab.ttf", "Default", 15.0f),
+			Font("Default", "Default", 15.0f), // Default will ignore font size.
+			Font("ArialUni.ttf", "Japanese", 15.0f),
+			Font("NanumBarunGothic.ttf", "Korean", 15.0f),
+			Font("gulim.ttc", "Korean", 15.0f),
+		};
+
+		// default port
+		strcpy(websocket_port, "10501");
+
 		{
+			GetModuleFileNameW(NULL, result, MAX_PATH);
+			boost::filesystem::path m = result;
+
+			Json::Reader r;
+			Json::Value setting;
+			try {
+				std::ifstream fin((m.parent_path() / "mod.json").wstring());
+				if (r.parse(fin, setting))
+				{
+					show_name = setting.get("show_name", true).asBool();
+					default_pet_job = setting.get("default_pet_job", default_pet_job).asString();
+					strcpy(websocket_port, setting.get("websocket_port", "10501").asCString());
+					Json::Value color = setting.get("color_map", Json::Value());
+					for (auto i = color.begin(); i != color.end(); ++i)
+					{
+						color_map[i.key().asString()] = htmlCodeToImVec4(i->asString());
+					}
+					Json::Value opacity = setting.get("opacity_map", Json::Value());
+					for (auto i = opacity.begin(); i != opacity.end(); ++i)
+					{
+						opacity_map[i.key().asString()] = i->asFloat();
+					}
+					Json::Value boolean = setting.get("boolean_map", Json::Value());
+					for (auto i = boolean.begin(); i != boolean.end(); ++i)
+					{
+						boolean_map[i.key().asString()] = i->asFloat();
+					}
+					Json::Value nameToJob = setting.get("name_to_job", Json::nullValue);
+					std::string name_to_job_str = "name_to_job";
+					if (nameToJob.find(&*name_to_job_str.begin(), &*name_to_job_str.begin() + name_to_job_str.size()) != nullptr)
+					{
+						name_to_job_map.clear();
+						for (auto i = nameToJob.begin();
+							i != nameToJob.end();
+							++i)
+						{
+							name_to_job_map[i.key().asString()] = i->asString();
+						}
+					}
+					Json::Value dealer_columns = setting.get("dealer_columns", Json::nullValue);
+					std::string dealer_columns_str = "dealer_columns";
+					if (setting.find(&*dealer_columns_str.begin(), &*dealer_columns_str.begin() + dealer_columns_str.size()) != nullptr)
+					{
+						dealerTable.columns.resize(3);
+						for (auto i = dealer_columns.begin();
+							i != dealer_columns.end();
+							++i)
+						{
+							Table::Column col;
+							col.FromJson(*i);
+							dealerTable.columns.push_back(col);
+						}
+					}
+					Json::Value fonts = setting.get("fonts", Json::nullValue);
+					std::string fonts_str = "fonts";
+					if (setting.find(&*fonts_str.begin(), &*fonts_str.begin() + fonts_str.size()) != nullptr)
+					{
+						if (fonts.size() > 0)
+						{
+							::fonts.clear();
+							for (auto i = fonts.begin();
+								i != fonts.end();
+								++i)
+							{
+								Font font;
+								font.FromJson(*i);
+								::fonts.push_back(font);
+							}
+						}
+					}
+
+					graph_bar = setting.get("graphbar", "flat").asString();
+				}
+				fin.close();
+			}
+			catch (...)
+			{
+			}
+		}
+		initialized = true;
+
+		//List of different bar graphics
+		graph_bars = {
+			"flat",
+			"otravi",
+			"zcube",
+			"graphite",
+		};
+
+
+
+
+		websocketThread();
+
+		{
+			// Changing or adding fonts at runtime causes a crash.
+			// TODO: is it possible ?...
+
+			ImGuiIO& io = ImGui::GetIO();
+
+			WCHAR result[MAX_PATH] = {};
+			GetWindowsDirectoryW(result, MAX_PATH);
+			boost::filesystem::path p = result;
+
+			GetModuleFileNameW(NULL, result, MAX_PATH);
+			boost::filesystem::path m = result;
+
+			// font
+			ImGui::GetIO().Fonts->Clear();
+
+			std::map<std::string, const ImWchar*> glyph_range_map = {
+				{ "Default", io.Fonts->GetGlyphRangesDefault() },
+				{ "Chinese", io.Fonts->GetGlyphRangesChinese() },
+				{ "Cyrillic", io.Fonts->GetGlyphRangesCyrillic() },
+				{ "Japanese", io.Fonts->GetGlyphRangesJapanese() },
+				{ "Korean", io.Fonts->GetGlyphRangesKorean() },
+				{ "Thai", io.Fonts->GetGlyphRangesThai() },
+			};
+
+			// Add fonts in this order.
+			glyph_range_key = {
+				"Default",
+				"Chinese",
+				"Cyrillic",
+				"Japanese",
+				"Korean",
+				"Thai",
+			};
+
+			std::vector<boost::filesystem::path> font_find_folders = {
+				m.parent_path(), // dll path
+				p / "Fonts", // windows fonts
+			};
+
+			ImFontConfig config;
+			config.MergeMode = false;
+			for (auto i = glyph_range_key.begin(); i != glyph_range_key.end(); ++i)
+			{
+				bool is_loaded = false;
+
+				for (auto j = fonts.begin(); j != fonts.end() && !is_loaded; ++j)
+				{
+					if (j->glyph_range == *i)
+					{
+						if (j->fontname == "Default")
+						{
+							io.Fonts->AddFontDefault(&config);
+							is_loaded = true;
+							config.MergeMode = true;
+						}
+						else
+						{
+							for (auto k = font_find_folders.begin(); k != font_find_folders.end(); ++k)
+							{
+								// ttf, ttc only
+								auto fontpath = (*k) / j->fontname;
+								if (boost::filesystem::exists(fontpath))
+								{
+									io.Fonts->AddFontFromFileTTF((fontpath).string().c_str(), j->font_size, &config, glyph_range_map[j->glyph_range]);
+									is_loaded = true;
+									config.MergeMode = true;
+								}
+							}
+						}
+					}
+				}
+
+				if (*i == "Default" && !is_loaded)
+				{
+					io.Fonts->AddFontDefault(&config);
+					is_loaded = true;
+					config.MergeMode = true;
+				}
+
+			}
 		}
 	}
-	initialized = true;
- 
-	websocketThread();
+	catch (std::exception& e)
+	{
+		std::cerr << e.what() << std::endl;
+	}
 	return 0;
 }
 
@@ -777,6 +969,13 @@ void SaveSettings()
 	}
 	setting["opacity_map"] = opacity;
 
+	Json::Value boolean;
+	for (auto i = boolean_map.begin(); i != boolean_map.end(); ++i)
+	{
+		boolean[i->first] = i->second;
+	}
+	setting["boolean_map"] = boolean;
+
 	Json::Value dealer_columns;
 	for (int i = 3; i < dealerTable.columns.size(); ++i)
 	{
@@ -786,22 +985,40 @@ void SaveSettings()
 	}
 	setting["dealer_columns"] = dealer_columns;
 
+	Json::Value fonts;
+	for (int i = 0; i < ::fonts.size(); ++i)
+	{
+		Json::Value font;
+		::fonts[i].ToJson(font);
+		fonts.append(font);
+	}
+	setting["fonts"] = fonts;
+
+	setting["graphbar"] = graph_bar;
+
 	std::ofstream fout((m.parent_path() / "mod.json").wstring());
 	fout << w.write(setting);
 	fout.close();
 }
 
+
 extern "C" int ModUnInit(ImGuiContext* context)
 {
+	boost::unique_lock<boost::mutex> l(font_mutex);
 	ImGui::SetCurrentContext(context);
 	SaveSettings();
+	initialized = false;
 	return 0;
 }
 
 extern "C" void ModTextureData(unsigned char** out_pixels, int* out_width, int* out_height, int* out_bytes_per_pixel)
 {
+	boost::unique_lock<boost::mutex> l(font_mutex);
 	assert(out_pixels != nullptr && out_width != nullptr && out_height != nullptr);
 	//*out_pixels = nullptr;
+	//*out_width = 0;
+	//*out_height = 0;
+	//return;
 	*out_pixels = overlay_texture_filedata;
 	*out_width = overlay_texture_width;
 	*out_height = overlay_texture_height;
@@ -811,9 +1028,11 @@ extern "C" void ModTextureData(unsigned char** out_pixels, int* out_width, int* 
 
 extern "C" void ModSetTexture(void* texture)
 {
+	boost::unique_lock<boost::mutex> l(font_mutex);
 	overlay_texture = texture;
 	if (texture == nullptr)
 	{
+		need_font_init = true;
 		// TODO: deinit texture;
 	}
 }
@@ -835,6 +1054,7 @@ void RenderTableColumnHeader(Table& table, int height)
 	{
 		if (!table.columns[i].visible)
 			continue;
+		const ImGuiStyle& style = ImGui::GetStyle();
 		ImVec2 winpos = ImGui::GetWindowPos();
 		ImVec2 pos = ImGui::GetCursorPos();
 		pos = window->DC.CursorPos;
@@ -888,7 +1108,6 @@ void RenderTableRow(Table& table, int row, int height)
 	int base = ImGui::GetCursorPosY();
 	ImGui::SetCursorPos(ImVec2(0, base));
 
-
 	int i = row;
 	{
 		std::string& jobStr = table.values[i][0];
@@ -898,7 +1117,6 @@ void RenderTableRow(Table& table, int row, int height)
 		if (table.maxValue == 0.0)
 			table.maxValue = 1.0;
 		float progress = atof(progressStr.c_str()) / table.maxValue;
-
 		ImVec4 progressColor = table.rows[i].color != nullptr ? *table.rows[i].color : color_map["etc"];
 
 		progressColor.w = graph_opacity * global_opacity;
@@ -907,9 +1125,7 @@ void RenderTableRow(Table& table, int row, int height)
 		ImVec2 pos = ImGui::GetCursorPos();
 		pos = window->DC.CursorPos;
 
-
-
-		Image& center = overlay_images["center"];
+		Image& center = overlay_images[graph_bar];
 
 		{
 			int length = (ImGui::GetWindowSize().x) * progress;
@@ -918,7 +1134,9 @@ void RenderTableRow(Table& table, int row, int height)
 			window->DrawList->AddImage(overlay_texture, bb.Min, ImVec2(bb.Max.x, pos.y + height),
 				center.uv0, center.uv1, ImGui::GetColorU32(progressColor));
 		}
-
+		//ImGui::RenderFrame(bb.Min, bb.Max, ImGui::GetColorU32(ImVec4(0.5, 0.5, 0.5, 0.0)), true, style.FrameRounding);
+		//ImRect bb2(pos, ImVec2(pos.x + ImGui::GetWindowSize().x * progress, pos.y + height));
+		//ImGui::RenderFrame(bb2.Min, bb2.Max, ImGui::GetColorU32(progressColor), true, style.FrameRounding);
 		for (int j = 0; j < table.columns.size() && j < table.values[i].size(); ++j)
 		{
 			if (!table.columns[j].visible)
@@ -974,7 +1192,7 @@ void RenderTable(Table& table)
 {
 	const ImGuiStyle& style = ImGui::GetStyle();
 	const ImGuiIO& io = ImGui::GetIO();
-	int windowWidth = ImGui::GetWindowSize().x - style.ItemInnerSpacing.x * 2.0f - 10;
+	int windowWidth = ImGui::GetWindowContentRegionWidth();
 	int column_max = table.columns.size();
 	const int height = 20 * io.FontGlobalScale;
 	table.UpdateColumnWidth(windowWidth, height, column_max, io.FontGlobalScale);
@@ -993,12 +1211,40 @@ void RenderTable(Table& table)
 
 void Preference(ImGuiContext* context, bool* show_preferences)
 {
-
-
-	ImGui::Begin("Preferences", show_preferences, ImVec2(500, 500), -1, ImGuiWindowFlags_NoCollapse);
+	ImGui::Begin("Preferences", show_preferences, ImVec2(300, 500), -1, ImGuiWindowFlags_NoCollapse);
 	{
+		ImGui::Text("Version : %s", VERSION_LONG_STRING);
+		ImGui::Text("Github : https://github.com/Falgern/ACTWebSocketOverlay/");
+		ImGui::Text("");
+		if (ImGui::TreeNode("General"))
+		{
+			if (ImGui::Checkbox("Show Names", &show_name))
+			{
+				SaveSettings();
+			}
+			if (ImGui::Checkbox("Windowed Status", &show_status))
+			{
+				SaveSettings();
+			}
+			if (ImGui::Checkbox("Top Status", &show_status_samewindow))
+			{
+				SaveSettings();
+			}
+			ImGui::TreePop();
+		}
+		if (ImGui::TreeNode("Graphs"))
+		{
+			static int current = -1;
 
 
+			if (ImGui::Combo("Bar Graphic", &current, graph_bars.data(), graph_bars.size()))
+			{
+				graph_bar = graph_bars[current];
+				SaveSettings();
+			}
+
+			ImGui::TreePop();
+		}
 		if (ImGui::TreeNode("Table"))
 		{
 			if (ImGui::TreeNode("DPS Table"))
@@ -1233,6 +1479,180 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 			}
 			ImGui::TreePop();
 		}
+		if (ImGui::TreeNode("Fonts"))
+		{
+			ImGui::Text("The font settings are applied at the next start.");
+			ImGui::Text("Default font is \'Default\'");
+			{
+				std::vector<const char*> data;
+				data.reserve(fonts.size());
+				for (int i = 0; i < fonts.size(); ++i)
+				{
+					data.push_back(fonts[i].fontname.c_str());
+				}
+
+				static int index_ = -1;
+				static char buf[100] = { 0, };
+				static int current_item = -1;
+				static float font_size = 15.0f;
+				static int glyph_range = 0;
+				static int index = -1;
+				bool decIndex = false;
+				bool incIndex = false;
+				if (ImGui::ListBox("Fonts", &index_, data.data(), data.size()))
+				{
+					index = index_;
+					strcpy(buf, fonts[index].fontname.c_str());
+					font_size = fonts[index].font_size;
+					auto ri = std::find(glyph_range_key.begin(), glyph_range_key.end(), fonts[index].glyph_range);
+					if (ri != glyph_range_key.end())
+					{
+						glyph_range = ri - glyph_range_key.begin();
+					}
+				}
+				if (ImGui::Button("Up"))
+				{
+					if (index > 0)
+					{
+						std::swap(fonts[index], fonts[index - 1]);
+						SaveSettings();
+						decIndex = true;
+					}
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Down"))
+				{
+					if (index + 1 < fonts.size())
+					{
+						std::swap(fonts[index], fonts[index + 1]);
+						SaveSettings();
+						incIndex = true;
+					}
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Edit"))
+				{
+					ImGui::OpenPopup("Edit Column");
+				}
+				if (ImGui::BeginPopup("Edit Column"))
+				{
+					if (ImGui::InputText("FontName", buf, 99))
+					{
+						fonts[index].fontname = buf;
+						SaveSettings();
+					}
+					if (ImGui::Combo("GlyphRange", &glyph_range, glyph_range_key.data(), glyph_range_key.size()))
+					{
+						if (glyph_range >= 0)
+						{
+							fonts[index].glyph_range = glyph_range_key[glyph_range];
+							SaveSettings();
+						}
+					}
+					if (ImGui::SliderFloat("Size", &font_size, 5, 100))
+					{
+						fonts[index].font_size = font_size;
+						SaveSettings();
+					}
+					ImGui::EndPopup();
+				}
+				ImGui::SameLine();
+
+				if (ImGui::Button("Remove"))
+				{
+					if (index > 0)
+					{
+						fonts.erase(fonts.begin() + index);
+						SaveSettings();
+					}
+					if (index >= fonts.size())
+					{
+						decIndex = true;
+					}
+				}
+				if (decIndex)
+				{
+					--index_;
+					index = index_;
+					if (index >= 0)
+					{
+						strcpy(buf, fonts[index].fontname.c_str());
+						font_size = fonts[index].font_size;
+						auto ri = std::find(glyph_range_key.begin(), glyph_range_key.end(), fonts[index].glyph_range);
+						if (ri != glyph_range_key.end())
+						{
+							glyph_range = ri - glyph_range_key.begin();
+						}
+					}
+					else
+					{
+						strcpy(buf, "");
+						font_size = 15.0f;
+						glyph_range = 0;
+					}
+				}
+				if (incIndex)
+				{
+					++index_;
+					index = index_;
+					if (index < fonts.size())
+					{
+						strcpy(buf, fonts[index].fontname.c_str());
+						font_size = fonts[index].font_size;
+						auto ri = std::find(glyph_range_key.begin(), glyph_range_key.end(), fonts[index].glyph_range);
+						if (ri != glyph_range_key.end())
+						{
+							glyph_range = ri - glyph_range_key.begin();
+						}
+					}
+					else
+					{
+						strcpy(buf, "");
+						font_size = 15.0f;
+						glyph_range = 0;
+					}
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Append"))
+				{
+					ImGui::OpenPopup("Append Column");
+				}
+				if (ImGui::BeginPopup("Append Column"))
+				{
+					static char buf[100] = { 0, };
+					static int glyph_range = -1;
+					static float font_size = 15.0f;
+					if (ImGui::InputText("Title", buf, 99))
+					{
+					}
+					if (ImGui::Combo("GlyphRange", &glyph_range, glyph_range_key.data(), glyph_range_key.size()))
+					{
+					}
+					if (ImGui::SliderFloat("Size", &font_size, 5, 100))
+					{
+						SaveSettings();
+					}
+					if (ImGui::Button("Append"))
+					{
+						if (glyph_range >= 0)
+						{
+							Font font;
+							font.fontname = buf;
+							font.font_size = font_size;
+							font.glyph_range = glyph_range_key[glyph_range];
+							fonts.push_back(font);
+							ImGui::CloseCurrentPopup();
+							strcpy(buf, "");
+							current_item = -1;
+							font_size = 15.0f;
+							SaveSettings();
+						}
+					}
+					ImGui::EndPopup();
+				}
+			}
+			ImGui::TreePop();
+		}
 		if (ImGui::TreeNode("Colors"))
 		{
 			if (ImGui::TreeNode("Group"))
@@ -1296,22 +1716,6 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 			}
 			ImGui::TreePop();
 		}
-		ImGui::NewLine();
-		ImGui::Separator();
-		ImGui::PushFont(largeFont);
-		ImGui::TextWrapped("Information");
-		ImGui::PopFont();
-		ImGui::TextWrapped("Pressing \"Name\" Toggles Name visibility");
-		ImGui::TextWrapped("Clicking on the colour will change between RGB/HSV/Hex configuration modes");
-		ImGui::TextWrapped("Shift + F2 (Default) will toggle reshade configuration panel");
-		ImGui::TextWrapped("Shift + F3 (Default) will toggle DPSMeter visibility");
-		ImGui::NewLine();
-		ImGui::NewLine();
-		ImGui::NewLine();
-		ImGui::NewLine();
-		ImGui::TextWrapped("This is a modification of AWIO (ActWebSocket ImGui Overlay) by ZCube");
-		ImGui::NewLine();
-		ImGui::TextWrapped("https://github.com/ZCube/ACTWebSocketOverlay");
 	}
 	ImGui::End();
 }
@@ -1319,37 +1723,40 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 extern "C" int ModRender(ImGuiContext* context)
 {
 	static bool show_preferences = false;
+	bool move_key_pressed = GetAsyncKeyState(VK_SHIFT) && GetAsyncKeyState(VK_CONTROL) && GetAsyncKeyState(VK_MENU);
+	bool use_input = movable || show_preferences || move_key_pressed;
 	try {
 		ImGui::SetCurrentContext(context);
 
 		{
-
+			ImVec2 padding(0, 0);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, padding);
 			ImGui::PushStyleColor(ImGuiCol_WindowBg, ColorWithAlpha(color_map["Background"], background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_TitleBg, ColorWithAlpha(color_map["TitleBackground"], title_background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ColorWithAlpha(color_map["TitleBackgroundActive"], title_background_opacity * global_opacity));
 			ImGui::PushStyleColor(ImGuiCol_TitleBgCollapsed, ColorWithAlpha(color_map["TitleBackgroundCollapsed"], title_background_opacity * global_opacity));
-			if(!hiddengrip){
+			ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], resizegrip_opacity));
+			ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, ColorWithAlpha(color_map["ResizeGripActive"], resizegrip_opacity));
+			ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, ColorWithAlpha(color_map["ResizeGripHovered"], resizegrip_opacity));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5, 0.5, 0.5, background_opacity * global_opacity));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3, 0.3, 0.3, background_opacity * global_opacity));
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0, 0.0, 0.0, 0.0f));
+
+			if (!hiddengrip) {
 				ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], resizegrip_opacity));
 			}
 			else
 			{
 				ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ColorWithAlpha(color_map["ResizeGrip"], 0.0f));
 			}
-			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 1.2f));
-
 			
-			ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, ColorWithAlpha(color_map["ResizeGripActive"], resizegrip_opacity));
-			ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, ColorWithAlpha(color_map["ResizeGripHovered"], resizegrip_opacity));
-			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5, 0.5, 0.5, background_opacity * global_opacity));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3, 0.3, 0.3, background_opacity * global_opacity));
-			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0, 0.0, 0.0, 0.0f));
 			ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["TitleText"], titletext_opacity * global_opacity));
 			ImGui::Begin("DPSMeter", nullptr, ImVec2(630, 300), -1,
-				//ImGuiWindowFlags_NoTitleBar);
 				NULL);
 			ImGuiWindow* window = ImGui::GetCurrentWindow();
-			if (!show_preferences && !window->Collapsed)
+			if (!show_preferences)
 			{
+				hiddengrip = true;
 				window_flags = 0;
 				window_flags |= ImGuiWindowFlags_NoInputs;
 				window->Flags = window_flags;
@@ -1357,72 +1764,130 @@ extern "C" int ModRender(ImGuiContext* context)
 			}
 			else
 			{
+				hiddengrip = false;
 				window_flags = 0;
 				window_flags |= ImGuiWindowFlags_ShowBorders;
 				window->Flags = window_flags;
 			}
-			//window->Flags = ImGuiWindowFlags_MenuBar;
-
 
 			mutex.lock();
-			ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["GraphText"], text_opacity * global_opacity));
-			// Moved to top line
-			std::string duration_short = "- " + duration;
-			std::string zone_short = zone;
-			
-			if(zone.size() >22)
-			{
-				zone_short.resize(20);
-				zone_short = zone_short + "..";
-			}
-			ImGui::Text(zone_short.c_str());
-			ImGui::SameLine();
-			ImGui::Text(duration_short.c_str());
-			ImGui::SameLine();
-			ImGui::Text(("| T.DPS : " + rdps).c_str());
-			ImGui::SameLine();
-			ImGui::Text(("T.HPS : " + rhps).c_str());
-			ImGui::PopStyleColor();
 
-			// Give spacing for scroll
-			ImGui::SameLine(ImGui::GetWindowWidth() - 30);
+			auto &io = ImGui::GetIO();
 			Image& cog = overlay_images["cog"];
+			//Image& resize = overlay_images["resize"];
+			ImVec4 color = ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity);
+			auto p = ImGui::GetCursorPos();
+			/*
+			ImGui::BeginChild("Btn",
+				//ImVec2(100,100),
+				ImVec2((cog.width + resize.width + 36) * io.FontGlobalScale / 6, (cog.height + 18) * io.FontGlobalScale / 6),
+				false,
+				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+			if (ImGui::ImageButton(overlay_texture, ImVec2(resize.width * io.FontGlobalScale / 6, resize.height * io.FontGlobalScale / 6), resize.uv0, resize.uv1, 2, ImVec4(0, 0, 0, 0), color))
+			{
+				movable = !movable;
+			}
+			ImGui::EndChild();
+
+			*/
+			//ImGui::SameLine((cog.width + 18) * io.FontGlobalScale / 6);
 			ImGui::BeginChild("cogbutton", ImVec2(18, 18), false, NULL);
-			
-			if (ImGui::ImageButton(overlay_texture, ImVec2(13.5f, 12.5f), cog.uv0, cog.uv1, -1, ImVec4(0, 0, 0, 0), ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity)))
+
+			if (ImGui::ImageButton(overlay_texture, ImVec2(cog.width * io.FontGlobalScale / 6, cog.height * io.FontGlobalScale / 6), cog.uv0, cog.uv1, -1, ImVec4(0, 0, 0, 0), ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity)))
 			{
 				show_preferences = !show_preferences;
-				
-				
+				movable = !movable;
+
 			}
-			
+
 			ImGui::EndChild();
-			//ImGui::PopStyleColor();
+
+			ImGui::SameLine();
+			if (show_status_samewindow)
+			{
+
+				ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["GraphText"], text_opacity * global_opacity));
+				// Moved to top line
+				std::string duration_short = "- " + duration;
+				std::string zone_short = zone;
+
+				if (zone.size() > 22)
+				{
+					zone_short.resize(20);
+					zone_short = zone_short + "..";
+				}
+				ImGui::Text(zone_short.c_str());
+				ImGui::SameLine();
+				ImGui::Text(duration_short.c_str());
+				ImGui::SameLine();
+				ImGui::Text(("| T.DPS : " + rdps).c_str());
+				ImGui::SameLine();
+				ImGui::Text(("T.HPS : " + rhps).c_str());
+				ImGui::PopStyleColor();
+				ImGui::NewLine();
+
+				ImGui::PopStyleVar(1);
+				p = ImVec2(p.x, p.y + ImGui::GetFontSize());
+
+			}
+			ImGui::SetCursorPos(p);
+
 			RenderTable(dealerTable);
 
 
-
-
-
 			ImGui::End();
+			
 
-			ImGui::PopStyleVar(1);
 
-			ImGui::PopStyleColor(11);
+			if (show_status)
+			{
+				ImGui::PushStyleColor(ImGuiCol_WindowBg, ColorWithAlpha(color_map["ToolbarBackground"], toolbar_opacity * global_opacity));
+				ImGui::PushStyleColor(ImGuiCol_Text, ColorWithAlpha(color_map["TitleText"], text_opacity * global_opacity));
+				ImGui::Begin("Status", nullptr, ImVec2(300, 50), -1,
+					ImGuiWindowFlags_NoTitleBar | (use_input ? NULL : ImGuiWindowFlags_NoInputs));
+				{
+					int height = 40 * io.FontGlobalScale;
+					const ImGuiStyle& style = ImGui::GetStyle();
+					ImGuiWindow* window = ImGui::GetCurrentWindow();
+					{
+						std::string duration_short = "- " + duration;
+
+						ImVec2 pos = ImGui::GetCursorPos();
+						ImGui::Text("%s - %s", zone.c_str(), duration.c_str(), rdps.c_str(), rhps.c_str());
+						ImGui::Text("RDPS : %s RHPS : %s", rdps.c_str(), rhps.c_str());
+
+						ImGui::SetCursorPos(pos);
+						ImGui::Text(" ");
+						ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - (65 + 5) * io.FontGlobalScale / 2);
+					}
+				}
+				ImGui::End();
+				ImGui::PopStyleColor(2);
+			}
+
+
+			//ImGui::Separator();
+
+			//ImGui::PopStyleVar();
+			ImGui::PopStyleColor(12);
+
 
 			if (show_preferences)
 			{
-				hiddengrip = false;
+				auto &io = ImGui::GetIO();
 				Preference(context, &show_preferences);
 			}
 			else
 			{
-				hiddengrip = true;
+				auto &io = ImGui::GetIO();
+				if (!use_input)
+				{
+					io.WantCaptureMouse = false;
+				}
+				io.WantCaptureKeyboard = false;
 			}
-
 			mutex.unlock();
 		}
-
 	}
 	catch (std::exception& e)
 	{

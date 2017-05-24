@@ -1,35 +1,49 @@
 # DPSMeter
-A Modified version of ActWebSocket overlay utility based on ImGui
-
-
-
+A Modified version of [ActWebSocket overlay utility based on ImGui by ZCube](https://github.com/ZCube/ACTWebSocketOverlay)
 *ActWebSocket needed.
 
-## Screenshots
+The goal is to add extra features and settings for additional user customization.
+
+
+### Additional features
+This a list of all additional features that have been added.
+* Status on top of window
+* Customizable bar graphic
+
+### Changes
+List of changes
+* "Move" button removed, this mode is activated by the configuration button
+* Status window (DPS/RHPS Time) has been added been changed to be affected by "Toolbar" opacity and colour settings.
+* Enabled title bar, opacity settings can hide these if needed.
+
+
+
+
+## Interface
+Button or Key | Description
+-------- | ----
+Shift + F3 | Show/Hide
+Gear icon | Show preference window.
+Move icon | Click-through.
+"Name" | Show/Hide names.
+Control + Scroll | Zoom.
+
+## Screenshot
 ![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot.png)
-![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot3.png)
-
-The font used in these screenshots is "Anonymous Pro Bold", you can get it here: [MarkSimonson.com](https://www.marksimonson.com/fonts/view/anonymous-pro)
-
-
-
-## Additional Features  
-
-* Minimalistic styling.  
-* Clickthrough  
-* Custom fonts  
-
+![N|Solid](https://raw.githubusercontent.com/Falgern/ACTWebSocketOverlay/master/screenshot2.png)
 
 ## Font
-* Windows/Fonts Check.
+* Search Path
+1. Game Directory
+2. Windows/Fonts
 
-Language | File
--------- | ----
-Japanese | ArialUni.ttf
-Korean | gulim.ttc
+Default Setting
 
-Use your own font by placing it in the game folder with the name "font.ttf".
-
+Language | File | Description
+-------- | ---- | --------
+Default | Default | ProggyClean.ttf font by Tristan Grimmer (MIT license).
+Japanese | ArialUni.ttf | -
+Korean | gulim.ttc | -
 
 ## File Overview
 Path | Description | License 
@@ -45,13 +59,8 @@ Library | Description
 [ImGui](https://github.com/ocornut/imgui) | Dear ImGui 
 [JsonCPP](https://github.com/open-source-parsers/jsoncpp) | Json Library for parsing Message and Settings
 
-
-## Release
-[Release](https://github.com/Falgern/ActWebSocketOverlay/releases)
-
-
-
-
+## Manual
+[Manual Google Presentation](https://docs.google.com/presentation/d/19uWnxraScX6bXAaX3My4YcTMnHZPDmXxNpg8QXjCeDY/pub?start=false&loop=false&delayms=3000)
 
 
 ## Build Tool
@@ -74,11 +83,6 @@ Microsoft Visual Studio Community 2015
     2. build.bat
 
 
-[ZCube/ACTWebSocketOverlay](https://github.com/ZCube/ACTWebSocketOverlay)
-
 ##
 
 NO WARRANTY. ANY USE OF THE SOFTWARE IS ENTIRELY AT YOUR OWN RISK.
-
-
-
