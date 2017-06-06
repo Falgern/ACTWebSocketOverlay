@@ -22,6 +22,10 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/hex.hpp>
 
+
+#include <atlstr.h>
+#define STR2UTF8(s) (CW2A(CA2W(s), CP_UTF8))
+
 // This source code seems to require refactoring. :<
 // Until then, focus on the features. I am not yet familiar with dear imgui.
 
@@ -32,7 +36,10 @@ std::unordered_map<ImGuiContext*, bool> font_inited;
 
 static bool show_name = true;
 
+static char websocket_message[1024] = { 0, };
+static char websocket_host[256] = { 0, };
 static char websocket_port[256] = { 0, };
+static bool websocket_reconnect = true;
 static void* overlay_texture = nullptr;
 static unsigned char *overlay_texture_filedata = nullptr;
 static int overlay_texture_width = 0, overlay_texture_height = 0, overlay_texture_channels = 0;
@@ -269,19 +276,32 @@ public:
 				boost::asio::ip::tcp::resolver r{ ios };
 				try {
 					// localhost only !
-					std::string const host = "127.0.0.1";
 					boost::asio::ip::tcp::socket sock{ ios };
+					std::string host = websocket_host;
 					auto endpoint = r.resolve(boost::asio::ip::tcp::resolver::query{ host, websocket_port });
 					std::string s = endpoint->service_name();
 					uint16_t p = endpoint->endpoint().port();
 					boost::asio::connect(sock, endpoint);
 
 					beast::websocket::stream<boost::asio::ip::tcp::socket&> ws{ sock };
+					
 					std::string host_port = host + ":" + websocket_port;
 					ws.handshake(host_port, "/MiniParse");
 
+					websocket_reconnect = false;
+
+					if (sock.is_open())
+					{
+						strcpy_s(websocket_message, 1023, "Connected");
+					}
 					while (sock.is_open() && loop)
 					{
+						if (websocket_reconnect)
+						{
+							sock.close();
+							std::cout << "Closed" << "\n";
+							break;
+						}
 						beast::multi_buffer b;
 						beast::websocket::opcode op;
 						ws.read(op, b);
@@ -402,15 +422,16 @@ public:
 				}
 				catch (std::exception& e)
 				{
+					strcpy_s(websocket_message, 1023, STR2UTF8(e.what()));
 					std::cerr << e.what() << std::endl;
 				}
 				catch (...)
 				{
-
+					strcpy_s(websocket_message, 1023, "Unknown exception");
 				}
 				if (!loop)
 					break;
-				for (int i = 0; i<50 && loop; ++i)
+				for (int i = 0; i<50 && loop && !websocket_reconnect; ++i)
 					Sleep(100);
 				if (!loop)
 					break;
@@ -761,7 +782,13 @@ extern "C" int ModInit(ImGuiContext* context)
 				{
 					show_name = setting.get("show_name", true).asBool();
 					default_pet_job = setting.get("default_pet_job", default_pet_job).asString();
+					strcpy(websocket_host, setting.get("websocket_host", "127.0.0.1").asCString());
 					strcpy(websocket_port, setting.get("websocket_port", "10501").asCString());
+					if (strcmp(websocket_host, "127.0.0.1") == 0)
+					{
+						// for ipv6
+						strcpy(websocket_host, "localhost");
+					}
 					Json::Value color = setting.get("color_map", Json::Value());
 					for (auto i = color.begin(); i != color.end(); ++i)
 					{
@@ -837,6 +864,8 @@ extern "C" int ModInit(ImGuiContext* context)
 			"otravi",
 			"zcube",
 			"graphite",
+			"bottomline",
+			"topline",
 		};
 
 
@@ -943,6 +972,7 @@ void SaveSettings()
 	Json::StyledWriter w;
 	Json::Value setting;
 	setting["show_name"] = show_name;
+	setting["websocket_host"] = websocket_host;
 	setting["websocket_port"] = websocket_port;
 	setting["default_pet_job"] = default_pet_job;
 
@@ -1216,6 +1246,8 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 		ImGui::Text("Version : %s", VERSION_LONG_STRING);
 		ImGui::Text("Github : https://github.com/Falgern/ACTWebSocketOverlay/");
 		ImGui::Text("");
+		ImGui::TextWrapped("WebSocket Status : %s", websocket_message);
+		ImGui::Separator();
 		if (ImGui::TreeNode("General"))
 		{
 			if (ImGui::Checkbox("Show Names", &show_name))
@@ -1464,8 +1496,16 @@ void Preference(ImGuiContext* context, bool* show_preferences)
 		}
 		if (ImGui::TreeNode("WebSocket"))
 		{
-			if (ImGui::InputText("WebSocket Port", websocket_port, 50, ImGuiInputTextFlags_CharsDecimal))
+			if (ImGui::InputText("Host", websocket_host, 50))
 			{
+				websocket_reconnect = true;
+				strcpy_s(websocket_message, 1023, "Connecting...");
+				SaveSettings();
+			}
+			if (ImGui::InputText("Port", websocket_port, 50, ImGuiInputTextFlags_CharsDecimal))
+			{
+				websocket_reconnect = true;
+				strcpy_s(websocket_message, 1023, "Connecting...");
 				SaveSettings();
 			}
 			ImGui::TreePop();
@@ -1763,6 +1803,7 @@ extern "C" int ModRender(ImGuiContext* context)
 				hiddengrip = true;
 				window_flags = 0;
 				window_flags |= ImGuiWindowFlags_NoInputs;
+				window_flags |= ImGuiWindowFlags_NoCollapse;
 				window->Flags = window_flags;
 
 			}
@@ -1824,9 +1865,9 @@ extern "C" int ModRender(ImGuiContext* context)
 				ImGui::SameLine();
 				ImGui::Text(duration_short.c_str());
 				ImGui::SameLine();
-				ImGui::Text(("| T.DPS : " + rdps).c_str());
+				ImGui::Text(("| DPS : " + rdps).c_str());
 				ImGui::SameLine();
-				ImGui::Text(("T.HPS : " + rhps).c_str());
+				ImGui::Text(("HPS : " + rhps).c_str());
 				ImGui::PopStyleColor();
 				ImGui::NewLine();
 
